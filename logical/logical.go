@@ -116,20 +116,20 @@ func (l *Logical) Size() (int64, error) {
 }
 
 // Load constructs the metadata mapping of a file from the given
-func (l *Logical) Load() (map[string]FileMetadata, error) {
+func (l *Logical) Recover() (map[string]FileMetadata, error) {
 	l.writeMutex.Lock()
 	defer l.writeMutex.Unlock()
 
 	metadata := make(map[string]FileMetadata)
 
+	var metadataEntry [headerLength]byte
 	for {
 		currOffset, err := l.file.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return nil, err
 		}
 
-		var id [16]byte
-		_, err = io.ReadFull(l.file, id[:])
+		_, err = io.ReadFull(l.file, metadataEntry[:])
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
@@ -137,22 +137,13 @@ func (l *Logical) Load() (map[string]FileMetadata, error) {
 			return nil, err
 		}
 
-		var lengthBytes [8]byte
-		_, err = io.ReadFull(l.file, lengthBytes[:])
-		if err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			}
-			return nil, err
-		}
-
-		contentLength := binary.LittleEndian.Uint64(lengthBytes[:])
+		contentLength := binary.LittleEndian.Uint64(metadataEntry[16:])
 		_, err = l.file.Seek(int64(contentLength), io.SeekCurrent)
 		if err != nil {
 			return nil, err
 		}
 
-		uuid, err := uuid.FromBytes(id[:])
+		uuid, err := uuid.FromBytes(metadataEntry[:16])
 		if err != nil {
 			return nil, fmt.Errorf("corrupted uuid: %s", err)
 		}
