@@ -5,6 +5,7 @@ import (
 	"path"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,12 +17,15 @@ func TestLogicalBasicNewFile(t *testing.T) {
 	defer log.Close()
 
 	data1 := []byte("hello world this is a image or some other file lol")
+	uuid1 := uuid.NewString()
 
-	offset1, err := log.WriteBytes(data1)
+	offset1, err := log.WriteFile(uuid1, data1)
 	assert.NoError(t, err)
 
 	data2 := []byte("this is some other data")
-	offset2, err := log.WriteBytes(data2)
+
+	uuid2 := uuid.NewString()
+	offset2, err := log.WriteFile(uuid2, data2)
 	assert.NoError(t, err)
 
 	data2Got, err := log.ReadBytes(offset2, int64(len(data2)))
@@ -47,12 +51,15 @@ func TestLogicalBasicExistingFile(t *testing.T) {
 	assert.NoError(t, err)
 
 	data1 := []byte("hello world this is a image or some other file lol")
+	uuid1 := uuid.NewString()
 
-	offset1, err := log.WriteBytes(data1)
+	offset1, err := log.WriteFile(uuid1, data1)
 	assert.NoError(t, err)
 
 	data2 := []byte("this is some other data")
-	offset2, err := log.WriteBytes(data2)
+
+	uuid2 := uuid.NewString()
+	offset2, err := log.WriteFile(uuid2, data2)
 	assert.NoError(t, err)
 
 	data2Got, err := log.ReadBytes(offset2, int64(len(data2)))
