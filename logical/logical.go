@@ -3,6 +3,7 @@ package logical
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 
@@ -20,6 +21,12 @@ import (
 // we cannot store just the file data as we need to be able to recover the state from the logical files.
 const uuidLength = 16
 const headerLength = uuidLength + 8
+
+type FileMetadata struct {
+	size   int64
+	offset int64
+	file   *Logical
+}
 
 type Logical struct {
 	writeMutex sync.Mutex
@@ -106,4 +113,55 @@ func (l *Logical) Size() (int64, error) {
 	}
 
 	return stat.Size(), nil
+}
+
+// Load constructs the metadata mapping of a file from the given
+func (l *Logical) Load() (map[string]FileMetadata, error) {
+	l.writeMutex.Lock()
+	defer l.writeMutex.Unlock()
+
+	metadata := make(map[string]FileMetadata)
+
+	for {
+		currOffset, err := l.file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+
+		var id [16]byte
+		_, err = io.ReadFull(l.file, id[:])
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			return nil, err
+		}
+
+		var lengthBytes [8]byte
+		_, err = io.ReadFull(l.file, lengthBytes[:])
+		if err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			return nil, err
+		}
+
+		contentLength := binary.LittleEndian.Uint64(lengthBytes[:])
+		_, err = l.file.Seek(int64(contentLength), io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+
+		uuid, err := uuid.FromBytes(id[:])
+		if err != nil {
+			return nil, fmt.Errorf("corrupted uuid: %s", err)
+		}
+
+		metadata[uuid.String()] = FileMetadata{
+			offset: currOffset,
+			size:   int64(contentLength),
+		}
+	}
+
+	return metadata, nil
 }

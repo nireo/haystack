@@ -7,17 +7,11 @@ import (
 	"github.com/nireo/haystack/logical"
 )
 
-type FileMetadata struct {
-	size   int64
-	offset int64
-	file   *logical.Logical
-}
-
 // Store has the logic for managing multiple logical volumes. It keeps track of all of the logical
 // volumes that exist.
 type Store struct {
-	metadata map[string]FileMetadata     // file id -> metadata
-	logicals map[string]*logical.Logical // logical id -> the file itself
+	metadata map[string]logical.FileMetadata // file id -> metadata
+	logicals map[string]*logical.Logical     // logical id -> the file itself
 	dir      string
 }
 
@@ -37,7 +31,7 @@ func (s *Store) StoreFile(id, logicalId string, data []byte) error {
 		return fmt.Errorf("logical volume not found: %s", logicalId)
 	}
 
-	offset, err := logical.WriteBytes(data)
+	offset, err := logical.WriteFile(id, data)
 	if err != nil {
 		return fmt.Errorf("failed to write bytes to logical: %s", err)
 	}
