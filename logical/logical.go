@@ -64,6 +64,16 @@ func (l *Logical) WriteBytes(data []byte) (int64, error) {
 	return storedOffset, nil
 }
 
+// Close closes the underlying file
 func (l *Logical) Close() error {
 	return l.file.Close()
+}
+
+func (l *Logical) Size() (int64, error) {
+	stat, err := l.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+
+	return stat.Size(), nil
 }
