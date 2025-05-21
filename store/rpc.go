@@ -77,3 +77,41 @@ func (s *StoreServer) Start() error {
 		go rpc.ServeConn(conn)
 	}
 }
+
+type CreateLogicalVolumeArgs struct {
+	ID string // ID of the logical volume
+}
+
+type CreateLogicalVolumeReply struct{}
+
+func (s *StoreServer) CreateLogicalVolume(args CreateLogicalVolumeArgs, reply *CreateLogicalVolumeReply) error {
+	return s.store.NewLogical(args.ID)
+}
+
+type LogicalVolumeInfo struct {
+	ID   string
+	Size int64
+}
+
+type GetLogicalVolumesArgs struct{}
+
+type GetLogicalVolumesReply struct {
+	Volumes []LogicalVolumeInfo
+}
+
+func (s *StoreServer) GetLogicalVolumes(args GetLogicalVolumesArgs, reply *GetLogicalVolumesReply) error {
+	volumes := make([]LogicalVolumeInfo, 0, len(s.store.logicals))
+	for id, file := range s.store.logicals {
+		size, err := file.Size()
+		if err != nil {
+			return err
+		}
+
+		volumes = append(volumes, LogicalVolumeInfo{
+			ID:   id,
+			Size: size,
+		})
+	}
+
+	return nil
+}
