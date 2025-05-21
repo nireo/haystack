@@ -10,11 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// logical represents a large file that contains multiple different files stored in a large file
-// the metadata then nows how much to read and where. Since the storage is mainly append-only
-// that means that we don't need locking for reading as its safe to read the file as no parts
-// are modified or deleted.
-
 // format on file:
 // | uuid 16 bytes | length 8 bytes | length bytes for content |
 //
@@ -28,6 +23,10 @@ type FileMetadata struct {
 	file   *Logical
 }
 
+// Logical represents a large file that contains multiple different smaller files the metadata
+// then shows how much to read and where. Since the storage is mainly append-only
+// that means that we don't need locking for reading as its safe to read the file as no parts
+// are modified or deleted.
 type Logical struct {
 	writeMutex sync.Mutex
 	offset     int64
@@ -49,7 +48,6 @@ func NewLogical(path string) (*Logical, error) {
 	}
 
 	offset := stat.Size()
-
 	return &Logical{
 		offset: offset,
 		file:   file,
