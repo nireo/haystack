@@ -131,6 +131,7 @@ func (s *Store) Recover() error {
 			}
 
 			s.index[name] = index
+			s.logicals[name] = logvol
 		}(file.Name())
 	}
 
