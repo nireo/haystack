@@ -126,10 +126,10 @@ func TestRecover(t *testing.T) {
 	assert.NoError(t, err)
 
 	m1 := metadata[uuid1]
-	assert.Equal(t, offset1, m1.offset)
-	assert.Equal(t, int64(len(data1)), m1.size)
+	assert.Equal(t, offset1, m1.Offset)
+	assert.Equal(t, int64(len(data1)), m1.Size)
 
 	m2 := metadata[uuid2]
-	assert.Equal(t, offset2, m2.offset)
-	assert.Equal(t, int64(len(data2)), m2.size)
+	assert.Equal(t, offset2, m2.Offset)
+	assert.Equal(t, int64(len(data2)), m2.Size)
 }

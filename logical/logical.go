@@ -17,10 +17,10 @@ import (
 const uuidLength = 16
 const headerLength = uuidLength + 8
 
+// FileMetadata contains information needed to read a file from disk.
 type FileMetadata struct {
-	size   int64
-	offset int64
-	file   *Logical
+	Size   int64
+	Offset int64
 }
 
 // Logical represents a large file that contains multiple different smaller files the metadata
@@ -147,8 +147,8 @@ func (l *Logical) Recover() (map[string]FileMetadata, error) {
 		}
 
 		metadata[uuid.String()] = FileMetadata{
-			offset: currOffset,
-			size:   int64(contentLength),
+			Offset: currOffset,
+			Size:   int64(contentLength),
 		}
 	}
 
