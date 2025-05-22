@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -19,13 +20,38 @@ type Store struct {
 	dir      string
 }
 
+func NewStore(dir string) (*Store, error) {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create store directory: %s", err)
+	}
+
+	return &Store{
+		index:    make(map[string]map[string]logical.FileMetadata),
+		logicals: make(map[string]*logical.Logical),
+		dir:      dir,
+	}, nil
+}
+
 func (s *Store) NewLogical(id string) error {
-	logical, err := logical.NewLogical(path.Join(s.dir, id))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.logicals[id]; ok {
+		log.Printf("logical volume %s already exists", id)
+		return nil
+	}
+	filePath := path.Join(s.dir, id)
+	logicalVol, err := logical.NewLogical(filePath)
 	if err != nil {
 		return err
 	}
 
-	s.logicals[id] = logical
+	s.logicals[id] = logicalVol
+	if s.index[id] == nil {
+		s.index[id] = make(map[string]logical.FileMetadata)
+	}
+
+	log.Printf("successfully created and registered new logical volume: %s", id)
 	return nil
 }
 
@@ -54,7 +80,7 @@ func (s *Store) CreateFile(fileID, logicalID string, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.index[s.dir]; !ok {
+	if _, ok := s.index[logicalID]; !ok {
 		s.index[logicalID] = make(map[string]logical.FileMetadata)
 	}
 

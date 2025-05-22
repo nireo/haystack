@@ -18,6 +18,7 @@ type StoreServer struct {
 func NewStoreServer(store *Store, port int) *StoreServer {
 	return &StoreServer{
 		store: store,
+		port:  port,
 	}
 }
 
@@ -112,6 +113,7 @@ func (s *StoreServer) GetLogicalVolumes(args GetLogicalVolumesArgs, reply *GetLo
 			Size: size,
 		})
 	}
+	reply.Volumes = volumes
 
 	return nil
 }
