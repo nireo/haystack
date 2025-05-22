@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	defaultReplicationFactor = 3
-	defaultMaxLVSize         = 1 << 30
+	defaultReplicationFactor       = 3
+	defaultMaxLVSize         int64 = 1 << 30
 )
 
 // StoreInfo contains information about a given store server. We store the address explicitly since the
