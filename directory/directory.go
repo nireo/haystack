@@ -67,11 +67,11 @@ type Directory struct {
 // NewDirectory creates a new directory instance and it validates the configuration values or sets them to the default values
 func NewDirectory(replicationFactor int, maxLVSize int64) *Directory {
 	if replicationFactor <= 0 {
-		log.Printf("Warning: Invalid replicationFactor %d, using default %d", replicationFactor, defaultReplicationFactor)
+		log.Printf("WARNING: Invalid replicationFactor %d, using default %d", replicationFactor, defaultReplicationFactor)
 		replicationFactor = defaultReplicationFactor
 	}
 	if maxLVSize <= 0 {
-		log.Printf("Warning: Invalid maxLVSize %d, using default %d", maxLVSize, defaultMaxLVSize)
+		log.Printf("WARNING: Invalid maxLVSize %d, using default %d", maxLVSize, defaultMaxLVSize)
 		maxLVSize = defaultMaxLVSize
 	}
 
@@ -112,7 +112,6 @@ type AssignWriteLocationInfo struct {
 type AssignWriteLocationsReply struct {
 	LogicalVolumeID string
 	Locations       []AssignWriteLocationInfo
-	Error           string
 }
 
 type GetReadLocationsArgs struct {
@@ -248,122 +247,196 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 	return alv, nil
 }
 
-// AssignWriteLocations takes in a file's metadata and assigns it to some logical volumes. It handles choosing the replication
-// it informs the caller about the logical volumes and how to call the stores. An important detail of this design is that
-// the directory doesn't interact with the stores themselves when it comes to writing. Only when creating more logical
-// volumes and getting information about the existing ones.
+// validateAssignWriteLocationsArgs performs basic validation on the arguments.
+func (d *Directory) validateAssignWriteLocationsArgs(args AssignWriteLocationsArgs) error {
+	if args.FileID == "" {
+		return errors.New("FileID cannot be empty")
+	}
+	if args.FileSize <= 0 {
+		return errors.New("FileSize must be positive")
+	}
+	if args.FileSize > d.maxLVSize {
+		return fmt.Errorf("FileSize %d exceeds max LV size %d", args.FileSize, d.maxLVSize)
+	}
+
+	return nil
+}
+
+// tryUseExistingLV attempts to find a writable LV with enough space and allocates the file size.
+// It updates the LV's current size and writable status.
+// It also advances d.currentLVIndex for the next allocation attempt.
+// Returns the selected LV and true if successful, otherwise nil and false.
+func (d *Directory) tryUseExistingLV(fileSize int64) (*LogicalVolume, bool) {
+	if len(d.activeWritableLVOrder) == 0 {
+		return nil, false
+	}
+
+	numLVs := len(d.activeWritableLVOrder)
+	for i := range numLVs {
+		idxToCheck := (d.currentLVIndex + i) % numLVs
+		lvID := d.activeWritableLVOrder[idxToCheck]
+		lv, ok := d.logicalVolumes[lvID]
+
+		if !ok {
+			log.Printf("Warning: LV ID %s from activeWritableLVOrder not found in logicalVolumes map. Will be pruned.", lvID)
+			continue
+		}
+
+		lv.mu.Lock()
+		if lv.IsWritable && (lv.CurrentSize+fileSize <= lv.MaxTotalSize) {
+			lv.CurrentSize += fileSize
+			if lv.CurrentSize >= lv.MaxTotalSize {
+				lv.IsWritable = false
+				log.Printf("LogicalVolume %s (%s) is now full. Current: %d, Max: %d", lv.ID, lvID, lv.CurrentSize, lv.MaxTotalSize)
+			}
+			lv.mu.Unlock()
+			d.currentLVIndex = (idxToCheck + 1) % numLVs
+			return lv, true
+		}
+		lv.mu.Unlock()
+	}
+	return nil, false
+}
+
+// createNewLogicalVolumeAndAllocate creates a new LV and allocates the file size to it.
+// It updates the new LV's current size and writable status.
+func (d *Directory) createNewLogicalVolumeAndAllocate(fileSize int64) (*LogicalVolume, error) {
+	newLV, err := d.createNewLogicalVolume() // This method already logs its progress/errors
+	if err != nil {
+		return nil, fmt.Errorf("could not create new logical volume: %w", err)
+	}
+
+	newLV.mu.Lock()
+	defer newLV.mu.Unlock()
+
+	if newLV.CurrentSize+fileSize > newLV.MaxTotalSize {
+		return nil, fmt.Errorf("internal error: new LV %s (max: %d) cannot fit file (size: %d), though file size was validated against d.maxLVSize (%d)",
+			newLV.ID, newLV.MaxTotalSize, fileSize, d.maxLVSize)
+	}
+
+	newLV.CurrentSize += fileSize
+	if newLV.CurrentSize >= newLV.MaxTotalSize {
+		newLV.IsWritable = false
+		log.Printf("Newly created LogicalVolume %s is immediately full after file of size %d. Current: %d, Max: %d", newLV.ID, fileSize, newLV.CurrentSize, newLV.MaxTotalSize)
+	}
+	return newLV, nil
+}
+
+// pruneAndUpdateActiveLVList removes non-writable LVs from activeWritableLVOrder
+// and updates d.currentLVIndex to maintain round-robin behavior.
+func (d *Directory) pruneAndUpdateActiveLVList() {
+	if len(d.activeWritableLVOrder) == 0 {
+		d.currentLVIndex = 0
+		return
+	}
+
+	var idAtOriginalCurrentIndex string
+	if d.currentLVIndex < len(d.activeWritableLVOrder) {
+		idAtOriginalCurrentIndex = d.activeWritableLVOrder[d.currentLVIndex]
+	} else if len(d.activeWritableLVOrder) > 0 {
+		d.currentLVIndex = 0
+		idAtOriginalCurrentIndex = d.activeWritableLVOrder[0]
+		log.Printf("Warning: currentLVIndex was out of bounds before pruning. Reset to 0.")
+	}
+
+	newActiveOrder := make([]string, 0, len(d.activeWritableLVOrder))
+	newIndexForOriginalCurrentLV := -1
+
+	for _, lvID := range d.activeWritableLVOrder {
+		lv, ok := d.logicalVolumes[lvID]
+		if !ok {
+			log.Printf("Warning: Pruning missing LV ID %s from active list (data inconsistency).", lvID)
+			continue
+		}
+
+		lv.mu.Lock()
+		isWritable := lv.IsWritable
+		lv.mu.Unlock()
+
+		if !isWritable {
+			log.Printf("Pruning non-writable LV %s from active list.", lvID)
+			continue
+		}
+
+		newActiveOrder = append(newActiveOrder, lvID)
+		if lvID == idAtOriginalCurrentIndex {
+			newIndexForOriginalCurrentLV = len(newActiveOrder) - 1
+		}
+	}
+
+	d.activeWritableLVOrder = newActiveOrder
+
+	if len(d.activeWritableLVOrder) == 0 {
+		d.currentLVIndex = 0
+	} else {
+		if newIndexForOriginalCurrentLV != -1 {
+			d.currentLVIndex = newIndexForOriginalCurrentLV
+		} else {
+			d.currentLVIndex = 0
+		}
+
+		if d.currentLVIndex >= len(d.activeWritableLVOrder) {
+			d.currentLVIndex = 0
+		}
+	}
+}
+
+// rollbackAllocation reverts the capacity change on an LV and removes the file index entry.
+func (d *Directory) rollbackAllocation(lv *LogicalVolume, fileID string, fileSize int64) {
+	log.Printf("Rolling back allocation for FileID %s from LV %s (size %d)", fileID, lv.ID, fileSize)
+
+	lv.mu.Lock()
+	lv.CurrentSize -= fileSize
+	if !lv.IsWritable && lv.CurrentSize < lv.MaxTotalSize {
+		lv.IsWritable = true
+		log.Printf("LV %s (%s) is now writable again after rollback.", lv.ID, fileID)
+	}
+	lv.mu.Unlock()
+
+	delete(d.fileIndex, fileID)
+}
+
+// AssignWriteLocations assigns a file to a logical volume, handling replication choices.
+// It is an RPC method.
 func (d *Directory) AssignWriteLocations(args AssignWriteLocationsArgs, reply *AssignWriteLocationsReply) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if args.FileID == "" {
-		reply.Error = "FileID cannot be empty"
-		return errors.New(reply.Error)
-	}
-	if args.FileSize <= 0 {
-		reply.Error = "FileSize must be positive"
-		return errors.New(reply.Error)
-	}
-	if args.FileSize > d.maxLVSize {
-		reply.Error = fmt.Sprintf("FileSize %d exceeds max  LV size %d", args.FileSize, d.maxLVSize)
-		return errors.New(reply.Error)
+	if err := d.validateAssignWriteLocationsArgs(args); err != nil {
+		return err
 	}
 
-	var selectedALV *LogicalVolume
+	var selectedLV *LogicalVolume
+	var LVCreated bool = false
 
-	if len(d.activeWritableLVOrder) > 0 {
-		initialIndex := d.currentLVIndex
-		for range d.activeWritableLVOrder {
-			lvID := d.activeWritableLVOrder[d.currentLVIndex]
-			alv, ok := d.logicalVolumes[lvID]
-
-			if ok {
-				alv.mu.Lock()
-				if alv.IsWritable && (alv.CurrentSize+args.FileSize <= alv.MaxTotalSize) {
-					selectedALV = alv
-					alv.CurrentSize += args.FileSize
-					if alv.CurrentSize >= alv.MaxTotalSize {
-						alv.IsWritable = false
-						log.Printf("LogicalVolume %s (%s) is now full. Current: %d, Max: %d", alv.ID, lvID, alv.CurrentSize, alv.MaxTotalSize)
-					}
-					alv.mu.Unlock()
-					d.currentLVIndex = (d.currentLVIndex + 1) % len(d.activeWritableLVOrder)
-					break
-				}
-				alv.mu.Unlock()
-			}
-			d.currentLVIndex = (d.currentLVIndex + 1) % len(d.activeWritableLVOrder)
-			if d.currentLVIndex == initialIndex && selectedALV == nil {
-				break
-			}
-		}
-	}
-
-	newActiveOrder := make([]string, 0, len(d.activeWritableLVOrder))
-	updatedCurrentIndex := -1
-	currentIndexPassed := false
-
-	for _, lvID := range d.activeWritableLVOrder {
-		alv, ok := d.logicalVolumes[lvID]
-		isStillWritable := false
-		if ok {
-			alv.mu.Lock()
-			isStillWritable = alv.IsWritable
-			alv.mu.Unlock()
-		}
-		if isStillWritable {
-			newActiveOrder = append(newActiveOrder, lvID)
-			if lvID == d.activeWritableLVOrder[d.currentLVIndex] && !currentIndexPassed {
-				updatedCurrentIndex = len(newActiveOrder) - 1
-				currentIndexPassed = true
-			}
-		} else {
-			log.Printf("Removing ALV %s from active writable list.", lvID)
-		}
-	}
-	d.activeWritableLVOrder = newActiveOrder
-	if len(d.activeWritableLVOrder) > 0 {
-		if updatedCurrentIndex != -1 {
-			d.currentLVIndex = updatedCurrentIndex
-		} else {
-			d.currentLVIndex = 0
-		}
-		if d.currentLVIndex >= len(d.activeWritableLVOrder) {
-			d.currentLVIndex = 0
-		}
+	lv, found := d.tryUseExistingLV(args.FileSize)
+	if found {
+		selectedLV = lv
 	} else {
-		d.currentLVIndex = 0
+		log.Printf("No suitable existing LogicalVolume for FileID %s (size %d). Creating a new one.", args.FileID, args.FileSize)
+		newLV, err := d.createNewLogicalVolumeAndAllocate(args.FileSize)
+		if err != nil {
+			return err
+		}
+		selectedLV = newLV
+		LVCreated = true
 	}
 
-	if selectedALV == nil {
-		log.Println("No suitable existing LogicalVolume found or all are full, creating a new one.")
-		alv, err := d.createNewLogicalVolume()
-		if err != nil {
-			reply.Error = fmt.Sprintf("failed to create new  logical volume: %v", err)
-			return errors.New(reply.Error)
-		}
-		selectedALV = alv
-		selectedALV.mu.Lock()
-		selectedALV.CurrentSize += args.FileSize
-		if selectedALV.CurrentSize >= selectedALV.MaxTotalSize {
-			selectedALV.IsWritable = false
-			log.Printf("Newly created LogicalVolume %s is immediately full after file of size %d. Current: %d, Max: %d", selectedALV.ID, args.FileSize, selectedALV.CurrentSize, selectedALV.MaxTotalSize)
-		}
-		selectedALV.mu.Unlock()
-	}
+	d.pruneAndUpdateActiveLVList()
 
 	d.fileIndex[args.FileID] = &FileMapping{
 		FileID:          args.FileID,
-		LogicalVolumeID: selectedALV.ID,
+		LogicalVolumeID: selectedLV.ID,
 		FileSize:        args.FileSize,
 	}
 
-	reply.LogicalVolumeID = selectedALV.ID
-	reply.Locations = make([]AssignWriteLocationInfo, 0, len(selectedALV.Placements))
-	for _, p := range selectedALV.Placements {
+	reply.LogicalVolumeID = selectedLV.ID
+	reply.Locations = make([]AssignWriteLocationInfo, 0, len(selectedLV.Placements))
+	for _, p := range selectedLV.Placements {
 		storeInfo, ok := d.stores[p.StoreID]
 		if !ok {
-			log.Printf("CRITICAL INCONSISTENCY: Store %s for placement of ALV %s not found in registry!", p.StoreID, selectedALV.ID)
+			log.Printf("CRITICAL INCONSISTENCY: Store %s for placement of LV %s (FileID %s) not found in registry! Skipping this location.",
+				p.StoreID, selectedLV.ID, args.FileID)
 			continue
 		}
 		reply.Locations = append(reply.Locations, AssignWriteLocationInfo{
@@ -374,21 +447,18 @@ func (d *Directory) AssignWriteLocations(args AssignWriteLocationsArgs, reply *A
 	}
 
 	if len(reply.Locations) < d.replicationFactor {
-		log.Printf("Warning: For FileID %s, ALV %s has only %d/%d available placements.", args.FileID, selectedALV.ID, len(reply.Locations), d.replicationFactor)
+		log.Printf("Warning: For FileID %s, LV %s has only %d/%d available placements due to missing store registrations for its placements.",
+			args.FileID, selectedLV.ID, len(reply.Locations), d.replicationFactor)
+
 		if len(reply.Locations) == 0 {
-			selectedALV.mu.Lock()
-			selectedALV.CurrentSize -= args.FileSize
-			if !selectedALV.IsWritable && selectedALV.CurrentSize < selectedALV.MaxTotalSize {
-				selectedALV.IsWritable = true
-			}
-			selectedALV.mu.Unlock()
-			delete(d.fileIndex, args.FileID)
-			reply.Error = fmt.Sprintf("no valid store locations could be determined for ALV %s for file %s", selectedALV.ID, args.FileID)
-			return errors.New(reply.Error)
+			d.rollbackAllocation(selectedLV, args.FileID, args.FileSize)
+			return fmt.Errorf("no valid store locations could be determined for LV %s (FileID %s); allocation rolled back. Required %d, found 0",
+				selectedLV.ID, args.FileID, d.replicationFactor)
 		}
 	}
 
-	log.Printf("Assigned FileID %s (size %d) to LV %s. Locations: %d. ALV CurrentSize: %d", args.FileID, args.FileSize, selectedALV.ID, len(reply.Locations), selectedALV.CurrentSize)
+	log.Printf("Successfully assigned FileID %s (size %d) to LV %s. Locations: %d. LV CurrentSize after alloc: %d. New LV created: %t.",
+		args.FileID, args.FileSize, selectedLV.ID, len(reply.Locations), selectedLV.CurrentSize, LVCreated)
 	return nil
 }
 
