@@ -79,8 +79,7 @@ func TestNewDirectory(t *testing.T) {
 		assert.NotNil(t, dir.stores)
 		assert.NotNil(t, dir.logicalVolumes)
 		assert.NotNil(t, dir.fileIndex)
-		assert.NotNil(t, dir.activeWritableLVOrder)
-		assert.Equal(t, 0, dir.currentLVIndex)
+		assert.NotNil(t, dir.writableLVs)
 	})
 
 	t.Run("CustomValid", func(t *testing.T) {
@@ -143,6 +142,10 @@ func TestDirectory_AssignAndGetLocations_Basic(t *testing.T) {
 	lv, ok := dir.logicalVolumes[assignReply.LogicalVolumeID]
 	require.True(t, ok)
 	assert.Equal(t, fileSize, lv.CurrentSize)
+
+	// Verify the LV is in the writable set since it's not full
+	_, inWritableSet := dir.writableLVs[assignReply.LogicalVolumeID]
+	assert.True(t, inWritableSet, "LV should be in writable set when not full")
 
 	storeLVID := ""
 	for i, loc := range assignReply.Locations {
@@ -222,7 +225,7 @@ func TestDirectory_GetReadLocations_FileNotFound(t *testing.T) {
 	var getReply GetReadLocationsReply
 	err := dir.GetReadLocations(getArgs, &getReply)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found in directory index")
+	assert.Contains(t, err.Error(), "not found")
 }
 
 func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
@@ -245,6 +248,7 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 	}
 	time.Sleep(10 * time.Millisecond)
 
+	// First file: partially fills LV
 	var reply1 AssignWriteLocationsReply
 	err := dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file1", FileSize: 60}, &reply1)
 	require.NoError(t, err)
@@ -253,16 +257,25 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, int64(60), lv1.CurrentSize)
 	assert.True(t, lv1.IsWritable)
-	assert.Len(t, dir.activeWritableLVOrder, 1)
 
+	// Verify LV is in writable set
+	_, inWritableSet := dir.writableLVs[lv1ID]
+	assert.True(t, inWritableSet, "LV should be in writable set when not full")
+
+	// Second file: fills LV completely
 	var reply2 AssignWriteLocationsReply
 	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file2", FileSize: 40}, &reply2)
 	require.NoError(t, err)
 	assert.Equal(t, lv1ID, reply2.LogicalVolumeID)
 	assert.Equal(t, int64(100), lv1.CurrentSize)
 	assert.False(t, lv1.IsWritable)
-	assert.Len(t, dir.activeWritableLVOrder, 0)
 
+	// Verify LV is removed from writable set when full
+	_, inWritableSet = dir.writableLVs[lv1ID]
+	assert.False(t, inWritableSet, "Full LV should be removed from writable set")
+	assert.Len(t, dir.writableLVs, 0, "No writable LVs should remain")
+
+	// Third file: should create new LV
 	var reply3 AssignWriteLocationsReply
 	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file3", FileSize: 10}, &reply3)
 	require.NoError(t, err)
@@ -273,8 +286,105 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, int64(10), lv2.CurrentSize)
 	assert.True(t, lv2.IsWritable)
-	assert.Len(t, dir.activeWritableLVOrder, 1)
-	assert.Equal(t, lv2ID, dir.activeWritableLVOrder[0])
+
+	// Verify new LV is in writable set
+	_, inWritableSet = dir.writableLVs[lv2ID]
+	assert.True(t, inWritableSet, "New LV should be in writable set")
+	assert.Len(t, dir.writableLVs, 1, "Should have exactly one writable LV")
+}
+
+func TestDirectory_DuplicateFileAssignment(t *testing.T) {
+	const numStores = 1
+	const testReplicationFactor = 1
+
+	listeners, storeAddresses := startNMockStores(t, numStores)
+	for _, l := range listeners {
+		defer l.Close()
+	}
+
+	dir := NewDirectory(testReplicationFactor, defaultMaxLVSize)
+	defer dir.Close()
+
+	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "store1", Address: storeAddresses[0]}, &RegisterStoreReply{})
+	require.NoError(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	// First assignment should succeed
+	var reply1 AssignWriteLocationsReply
+	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "samefile", FileSize: 100}, &reply1)
+	require.NoError(t, err)
+
+	// Second assignment of same file should fail
+	var reply2 AssignWriteLocationsReply
+	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "samefile", FileSize: 100}, &reply2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+}
+
+func TestDirectory_WritableLVManagement(t *testing.T) {
+	const numStores = 1
+	const testReplicationFactor = 1
+	const maxLVSizeSmall = 150
+
+	listeners, storeAddresses := startNMockStores(t, numStores)
+	for _, l := range listeners {
+		defer l.Close()
+	}
+
+	dir := NewDirectory(testReplicationFactor, maxLVSizeSmall)
+	defer dir.Close()
+
+	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "store1", Address: storeAddresses[0]}, &RegisterStoreReply{})
+	require.NoError(t, err)
+	time.Sleep(10 * time.Millisecond)
+
+	// Initially no writable LVs
+	assert.Len(t, dir.writableLVs, 0)
+
+	// Create first LV
+	var reply1 AssignWriteLocationsReply
+	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file1", FileSize: 50}, &reply1)
+	require.NoError(t, err)
+	lv1ID := reply1.LogicalVolumeID
+
+	// Should have one writable LV
+	assert.Len(t, dir.writableLVs, 1)
+	_, exists := dir.writableLVs[lv1ID]
+	assert.True(t, exists)
+
+	// Add more files to same LV
+	var reply2 AssignWriteLocationsReply
+	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file2", FileSize: 50}, &reply2)
+	require.NoError(t, err)
+	assert.Equal(t, lv1ID, reply2.LogicalVolumeID) // Same LV used
+
+	// Still writable
+	assert.Len(t, dir.writableLVs, 1)
+	_, exists = dir.writableLVs[lv1ID]
+	assert.True(t, exists)
+
+	// Fill LV completely
+	var reply3 AssignWriteLocationsReply
+	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file3", FileSize: 50}, &reply3)
+	require.NoError(t, err)
+	assert.Equal(t, lv1ID, reply3.LogicalVolumeID)
+
+	// LV should be removed from writable set when full
+	assert.Len(t, dir.writableLVs, 0)
+	_, exists = dir.writableLVs[lv1ID]
+	assert.False(t, exists)
+
+	// Next file should create new LV
+	var reply4 AssignWriteLocationsReply
+	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file4", FileSize: 10}, &reply4)
+	require.NoError(t, err)
+	lv2ID := reply4.LogicalVolumeID
+	assert.NotEqual(t, lv1ID, lv2ID)
+
+	// New LV should be in writable set
+	assert.Len(t, dir.writableLVs, 1)
+	_, exists = dir.writableLVs[lv2ID]
+	assert.True(t, exists)
 }
 
 func TestDirectory_Close(t *testing.T) {
