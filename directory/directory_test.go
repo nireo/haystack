@@ -19,7 +19,7 @@ import (
 
 type MockStore struct{}
 
-func (s *MockStore) CreateLogicalVolume(args CreateLogicalVolumeStoreArgs, reply *CreateLogicalVolumeStoreReply) error {
+func (s *MockStore) CreateLogicalVolume(args CreateLogicalVolumeArgs, reply *CreateLogicalVolumeReply) error {
 	return nil
 }
 
@@ -94,18 +94,16 @@ func TestDirectory_RegisterStore(t *testing.T) {
 	dir := NewDirectory(defaultReplicationFactor, defaultMaxLVSize)
 	defer dir.Close()
 
-	args1 := RegisterStoreArgs{StoreID: "store1", Address: "127.0.0.1:8001"}
-	err := dir.RegisterStore(args1, &RegisterStoreReply{})
+	err := dir.RegisterStore("store1", "127.0.0.1:8001")
 	require.NoError(t, err)
 	assert.Contains(t, dir.stores, "store1")
 	assert.Equal(t, "127.0.0.1:8001", dir.stores["store1"].Address)
 
-	args2 := RegisterStoreArgs{StoreID: "store1", Address: "127.0.0.1:8002"}
-	err = dir.RegisterStore(args2, &RegisterStoreReply{})
+	err = dir.RegisterStore("store1", "127.0.0.1:8002")
 	require.NoError(t, err)
 	assert.Equal(t, "127.0.0.1:8002", dir.stores["store1"].Address)
 
-	err = dir.RegisterStore(RegisterStoreArgs{}, &RegisterStoreReply{})
+	err = dir.RegisterStore("", "")
 	require.Error(t, err)
 }
 
@@ -122,33 +120,31 @@ func TestDirectory_AssignAndGetLocations_Basic(t *testing.T) {
 
 	for i := range numStores {
 		storeID := "mockstore" + strconv.Itoa(i)
-		err := dir.RegisterStore(RegisterStoreArgs{StoreID: storeID, Address: storeAddresses[i]}, &RegisterStoreReply{})
+		err := dir.RegisterStore(storeID, storeAddresses[i])
 		require.NoError(t, err, "Failed to register store %s", storeID)
 	}
 	time.Sleep(10 * time.Millisecond) // Brief pause for RPC clients to potentially establish
 
 	fileID := uuid.New().String()
 	fileSize := int64(1024)
-	assignArgs := AssignWriteLocationsArgs{FileID: fileID, FileSize: fileSize}
-	var assignReply AssignWriteLocationsReply
 
-	err := dir.AssignWriteLocations(assignArgs, &assignReply)
+	logicalVolumeID, locations, err := dir.AssignWriteLocations(fileID, fileSize)
 	require.NoError(t, err)
-	require.NotEmpty(t, assignReply.LogicalVolumeID)
-	require.Len(t, assignReply.Locations, testReplicationFactor)
+	require.NotEmpty(t, logicalVolumeID)
+	require.Len(t, locations, testReplicationFactor)
 
 	assert.NotNil(t, dir.fileIndex[fileID])
-	assert.Equal(t, assignReply.LogicalVolumeID, dir.fileIndex[fileID].LogicalVolumeID)
-	lv, ok := dir.logicalVolumes[assignReply.LogicalVolumeID]
+	assert.Equal(t, logicalVolumeID, dir.fileIndex[fileID].LogicalVolumeID)
+	lv, ok := dir.logicalVolumes[logicalVolumeID]
 	require.True(t, ok)
 	assert.Equal(t, fileSize, lv.CurrentSize)
 
 	// Verify the LV is in the writable set since it's not full
-	_, inWritableSet := dir.writableLVs[assignReply.LogicalVolumeID]
+	_, inWritableSet := dir.writableLVs[logicalVolumeID]
 	assert.True(t, inWritableSet, "LV should be in writable set when not full")
 
 	storeLVID := ""
-	for i, loc := range assignReply.Locations {
+	for i, loc := range locations {
 		assert.NotEmpty(t, loc.StoreID)
 		assert.NotEmpty(t, loc.StoreAddress)
 		assert.NotEmpty(t, loc.LogicalVolumeID)
@@ -159,15 +155,13 @@ func TestDirectory_AssignAndGetLocations_Basic(t *testing.T) {
 		}
 	}
 
-	getArgs := GetReadLocationsArgs{FileID: fileID}
-	var getReply GetReadLocationsReply
-	err = dir.GetReadLocations(getArgs, &getReply)
+	readLocations, err := dir.GetReadLocations(fileID)
 	require.NoError(t, err)
-	require.Len(t, getReply.Locations, testReplicationFactor)
+	require.Len(t, readLocations, testReplicationFactor)
 
-	for i, readLoc := range getReply.Locations {
+	for i, readLoc := range readLocations {
 		found := false
-		for _, writeLoc := range assignReply.Locations {
+		for _, writeLoc := range locations {
 			if readLoc.StoreID == writeLoc.StoreID &&
 				readLoc.StoreAddress == writeLoc.StoreAddress &&
 				readLoc.LogicalVolumeID == writeLoc.LogicalVolumeID {
@@ -186,12 +180,10 @@ func TestDirectory_AssignWriteLocations_FileSizeExceedsMaxLV(t *testing.T) {
 
 	listeners, storeAddresses := startNMockStores(t, 1)
 	defer listeners[0].Close()
-	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "s1", Address: storeAddresses[0]}, &RegisterStoreReply{})
+	err := dir.RegisterStore("s1", storeAddresses[0])
 	require.NoError(t, err)
 
-	assignArgs := AssignWriteLocationsArgs{FileID: "bigfile", FileSize: 200}
-	var assignReply AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(assignArgs, &assignReply)
+	_, _, err = dir.AssignWriteLocations("bigfile", 200)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exceeds max LV size")
 }
@@ -204,14 +196,12 @@ func TestDirectory_AssignWriteLocations_NotEnoughStoresForInitialLV(t *testing.T
 	for _, l := range listeners {
 		defer l.Close()
 	}
-	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "s1", Address: storeAddresses[0]}, &RegisterStoreReply{})
+	err := dir.RegisterStore("s1", storeAddresses[0])
 	require.NoError(t, err)
-	err = dir.RegisterStore(RegisterStoreArgs{StoreID: "s2", Address: storeAddresses[1]}, &RegisterStoreReply{})
+	err = dir.RegisterStore("s2", storeAddresses[1])
 	require.NoError(t, err)
 
-	assignArgs := AssignWriteLocationsArgs{FileID: "somefile", FileSize: 100}
-	var assignReply AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(assignArgs, &assignReply)
+	_, _, err = dir.AssignWriteLocations("somefile", 100)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not enough registered stores")
 	assert.Contains(t, err.Error(), "to meet replication factor")
@@ -221,9 +211,7 @@ func TestDirectory_GetReadLocations_FileNotFound(t *testing.T) {
 	dir := NewDirectory(1, defaultMaxLVSize)
 	defer dir.Close()
 
-	getArgs := GetReadLocationsArgs{FileID: "nonexistentfile"}
-	var getReply GetReadLocationsReply
-	err := dir.GetReadLocations(getArgs, &getReply)
+	_, err := dir.GetReadLocations("nonexistentfile")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -243,16 +231,14 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 
 	for i := range numStores {
 		storeID := "mockstore-lvfull" + strconv.Itoa(i)
-		err := dir.RegisterStore(RegisterStoreArgs{StoreID: storeID, Address: storeAddresses[i]}, &RegisterStoreReply{})
+		err := dir.RegisterStore(storeID, storeAddresses[i])
 		require.NoError(t, err)
 	}
 	time.Sleep(10 * time.Millisecond)
 
 	// First file: partially fills LV
-	var reply1 AssignWriteLocationsReply
-	err := dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file1", FileSize: 60}, &reply1)
+	lv1ID, _, err := dir.AssignWriteLocations("file1", 60)
 	require.NoError(t, err)
-	lv1ID := reply1.LogicalVolumeID
 	lv1, ok := dir.logicalVolumes[lv1ID]
 	require.True(t, ok)
 	assert.Equal(t, int64(60), lv1.CurrentSize)
@@ -263,10 +249,9 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 	assert.True(t, inWritableSet, "LV should be in writable set when not full")
 
 	// Second file: fills LV completely
-	var reply2 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file2", FileSize: 40}, &reply2)
+	lv2ID, _, err := dir.AssignWriteLocations("file2", 40)
 	require.NoError(t, err)
-	assert.Equal(t, lv1ID, reply2.LogicalVolumeID)
+	assert.Equal(t, lv1ID, lv2ID)
 	assert.Equal(t, int64(100), lv1.CurrentSize)
 	assert.False(t, lv1.IsWritable)
 
@@ -276,19 +261,17 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 	assert.Len(t, dir.writableLVs, 0, "No writable LVs should remain")
 
 	// Third file: should create new LV
-	var reply3 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file3", FileSize: 10}, &reply3)
+	lv3ID, _, err := dir.AssignWriteLocations("file3", 10)
 	require.NoError(t, err)
-	lv2ID := reply3.LogicalVolumeID
-	assert.NotEqual(t, lv1ID, lv2ID, "A new LV should have been created")
+	assert.NotEqual(t, lv1ID, lv3ID, "A new LV should have been created")
 
-	lv2, ok := dir.logicalVolumes[lv2ID]
+	lv2, ok := dir.logicalVolumes[lv3ID]
 	require.True(t, ok)
 	assert.Equal(t, int64(10), lv2.CurrentSize)
 	assert.True(t, lv2.IsWritable)
 
 	// Verify new LV is in writable set
-	_, inWritableSet = dir.writableLVs[lv2ID]
+	_, inWritableSet = dir.writableLVs[lv3ID]
 	assert.True(t, inWritableSet, "New LV should be in writable set")
 	assert.Len(t, dir.writableLVs, 1, "Should have exactly one writable LV")
 }
@@ -305,18 +288,16 @@ func TestDirectory_DuplicateFileAssignment(t *testing.T) {
 	dir := NewDirectory(testReplicationFactor, defaultMaxLVSize)
 	defer dir.Close()
 
-	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "store1", Address: storeAddresses[0]}, &RegisterStoreReply{})
+	err := dir.RegisterStore("store1", storeAddresses[0])
 	require.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
 	// First assignment should succeed
-	var reply1 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "samefile", FileSize: 100}, &reply1)
+	_, _, err = dir.AssignWriteLocations("samefile", 100)
 	require.NoError(t, err)
 
 	// Second assignment of same file should fail
-	var reply2 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "samefile", FileSize: 100}, &reply2)
+	_, _, err = dir.AssignWriteLocations("samefile", 100)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 }
@@ -334,7 +315,7 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	dir := NewDirectory(testReplicationFactor, maxLVSizeSmall)
 	defer dir.Close()
 
-	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "store1", Address: storeAddresses[0]}, &RegisterStoreReply{})
+	err := dir.RegisterStore("store1", storeAddresses[0])
 	require.NoError(t, err)
 	time.Sleep(10 * time.Millisecond)
 
@@ -342,10 +323,8 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	assert.Len(t, dir.writableLVs, 0)
 
 	// Create first LV
-	var reply1 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file1", FileSize: 50}, &reply1)
+	lv1ID, _, err := dir.AssignWriteLocations("file1", 50)
 	require.NoError(t, err)
-	lv1ID := reply1.LogicalVolumeID
 
 	// Should have one writable LV
 	assert.Len(t, dir.writableLVs, 1)
@@ -353,10 +332,9 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	assert.True(t, exists)
 
 	// Add more files to same LV
-	var reply2 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file2", FileSize: 50}, &reply2)
+	lv2ID, _, err := dir.AssignWriteLocations("file2", 50)
 	require.NoError(t, err)
-	assert.Equal(t, lv1ID, reply2.LogicalVolumeID) // Same LV used
+	assert.Equal(t, lv1ID, lv2ID) // Same LV used
 
 	// Still writable
 	assert.Len(t, dir.writableLVs, 1)
@@ -364,10 +342,9 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	assert.True(t, exists)
 
 	// Fill LV completely
-	var reply3 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file3", FileSize: 50}, &reply3)
+	lv3ID, _, err := dir.AssignWriteLocations("file3", 50)
 	require.NoError(t, err)
-	assert.Equal(t, lv1ID, reply3.LogicalVolumeID)
+	assert.Equal(t, lv1ID, lv3ID)
 
 	// LV should be removed from writable set when full
 	assert.Len(t, dir.writableLVs, 0)
@@ -375,15 +352,13 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	assert.False(t, exists)
 
 	// Next file should create new LV
-	var reply4 AssignWriteLocationsReply
-	err = dir.AssignWriteLocations(AssignWriteLocationsArgs{FileID: "file4", FileSize: 10}, &reply4)
+	lv4ID, _, err := dir.AssignWriteLocations("file4", 10)
 	require.NoError(t, err)
-	lv2ID := reply4.LogicalVolumeID
-	assert.NotEqual(t, lv1ID, lv2ID)
+	assert.NotEqual(t, lv1ID, lv4ID)
 
 	// New LV should be in writable set
 	assert.Len(t, dir.writableLVs, 1)
-	_, exists = dir.writableLVs[lv2ID]
+	_, exists = dir.writableLVs[lv4ID]
 	assert.True(t, exists)
 }
 
@@ -394,7 +369,7 @@ func TestDirectory_Close(t *testing.T) {
 	l := listeners[0]
 	storeAddr := storeAddresses[0]
 
-	err := dir.RegisterStore(RegisterStoreArgs{StoreID: "s1", Address: storeAddr}, &RegisterStoreReply{})
+	err := dir.RegisterStore("s1", storeAddr)
 	require.NoError(t, err)
 
 	_, err = dir.getOrEstablishStoreClient("s1")

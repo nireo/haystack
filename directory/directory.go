@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/rpc"
 	"sync"
 
@@ -46,6 +45,20 @@ type FileMapping struct {
 	FileSize        int64
 }
 
+// WriteLocationInfo contains information about where a file should be written
+type WriteLocationInfo struct {
+	StoreID         string
+	StoreAddress    string
+	LogicalVolumeID string
+}
+
+// ReadLocationInfo contains information about where a file can be read from
+type ReadLocationInfo struct {
+	StoreID         string
+	StoreAddress    string
+	LogicalVolumeID string
+}
+
 // Directory handles choosing replication locations for files
 type Directory struct {
 	mu             sync.RWMutex
@@ -79,71 +92,29 @@ func NewDirectory(replicationFactor int, maxLVSize int64) *Directory {
 	}
 }
 
-// RPC argument and reply types (keeping existing ones)
-type RegisterStoreArgs struct {
-	StoreID string
-	Address string
-}
-type RegisterStoreReply struct{}
-
-type AssignWriteLocationsArgs struct {
-	FileID   string
-	FileSize int64
-}
-
-type AssignWriteLocationInfo struct {
-	StoreID         string
-	StoreAddress    string
-	LogicalVolumeID string
-}
-
-type AssignWriteLocationsReply struct {
-	LogicalVolumeID string
-	Locations       []AssignWriteLocationInfo
-}
-
-type GetReadLocationsArgs struct {
-	FileID string
-}
-
-type GetReadLocationInfo struct {
-	StoreID         string
-	StoreAddress    string
-	LogicalVolumeID string
-}
-
-type GetReadLocationsReply struct {
-	Locations []GetReadLocationInfo
-}
-
-type CreateLogicalVolumeStoreArgs struct {
-	ID string
-}
-
-type CreateLogicalVolumeStoreReply struct{}
-
-func (d *Directory) RegisterStore(args RegisterStoreArgs, reply *RegisterStoreReply) error {
+// RegisterStore registers a new store with the directory
+func (d *Directory) RegisterStore(storeID, address string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if args.StoreID == "" || args.Address == "" {
+	if storeID == "" || address == "" {
 		return errors.New("store id and address cannot be empty")
 	}
 
-	if existingStore, exists := d.stores[args.StoreID]; exists {
-		log.Printf("store %s re-registering. old address: %s, new address: %s", args.StoreID, existingStore.Address, args.Address)
+	if existingStore, exists := d.stores[storeID]; exists {
+		log.Printf("store %s re-registering. old address: %s, new address: %s", storeID, existingStore.Address, address)
 		if existingStore.Client != nil {
 			existingStore.Client.Close()
 		}
 	}
 
-	d.stores[args.StoreID] = &StoreInfo{
-		ID:      args.StoreID,
-		Address: args.Address,
+	d.stores[storeID] = &StoreInfo{
+		ID:      storeID,
+		Address: address,
 		Client:  nil,
 	}
 
-	log.Printf("store %s registered with address %s", args.StoreID, args.Address)
+	log.Printf("store %s registered with address %s", storeID, address)
 	return nil
 }
 
@@ -196,6 +167,14 @@ func (d *Directory) allocateSpace(lv *LogicalVolume, fileSize int64) {
 	}
 }
 
+// CreateLogicalVolumeArgs represents the arguments for creating a logical volume on a store
+type CreateLogicalVolumeArgs struct {
+	ID string
+}
+
+// CreateLogicalVolumeReply represents the reply for creating a logical volume on a store
+type CreateLogicalVolumeReply struct{}
+
 func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 	if len(d.stores) < d.replicationFactor {
 		return nil, fmt.Errorf("not enough registered stores (%d) to meet replication factor (%d)", len(d.stores), d.replicationFactor)
@@ -222,8 +201,8 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 			continue
 		}
 
-		createLVArgs := CreateLogicalVolumeStoreArgs{ID: lvidOnNew}
-		var createLVReply CreateLogicalVolumeStoreReply
+		createLVArgs := CreateLogicalVolumeArgs{ID: lvidOnNew}
+		var createLVReply CreateLogicalVolumeReply
 		err = client.Call("Store.CreateLogicalVolume", createLVArgs, &createLVReply)
 		if err != nil {
 			log.Printf("Failed to create logical volume %s on store %s: %v. Closing client.", lvidOnNew, storeID, err)
@@ -260,158 +239,134 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 	return alv, nil
 }
 
-func (d *Directory) validateAssignWriteLocationsArgs(args AssignWriteLocationsArgs) error {
-	if args.FileID == "" {
+func (d *Directory) validateAssignWriteLocationsArgs(fileID string, fileSize int64) error {
+	if fileID == "" {
 		return errors.New("FileID cannot be empty")
 	}
-	if args.FileSize <= 0 {
+	if fileSize <= 0 {
 		return errors.New("FileSize must be positive")
 	}
-	if args.FileSize > d.maxLVSize {
-		return fmt.Errorf("FileSize %d exceeds max LV size %d", args.FileSize, d.maxLVSize)
+	if fileSize > d.maxLVSize {
+		return fmt.Errorf("FileSize %d exceeds max LV size %d", fileSize, d.maxLVSize)
 	}
 	return nil
 }
 
-// Simplified main assignment logic
-func (d *Directory) AssignWriteLocations(args AssignWriteLocationsArgs, reply *AssignWriteLocationsReply) error {
+// AssignWriteLocations assigns write locations for a file
+func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string, []WriteLocationInfo, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if err := d.validateAssignWriteLocationsArgs(args); err != nil {
-		return err
+	if err := d.validateAssignWriteLocationsArgs(fileID, fileSize); err != nil {
+		return "", nil, err
 	}
 
 	// Check if file already exists
-	if _, exists := d.fileIndex[args.FileID]; exists {
-		return fmt.Errorf("file %s already exists", args.FileID)
+	if _, exists := d.fileIndex[fileID]; exists {
+		return "", nil, fmt.Errorf("file %s already exists", fileID)
 	}
 
 	// Try to find existing writable LV
 	var selectedLV *LogicalVolume
-	selectedLV = d.findWritableLV(args.FileSize)
+	selectedLV = d.findWritableLV(fileSize)
 
 	// If no suitable LV found, create new one
 	if selectedLV == nil {
-		log.Printf("No suitable existing LogicalVolume for FileID %s (size %d). Creating a new one.", args.FileID, args.FileSize)
+		log.Printf("No suitable existing LogicalVolume for FileID %s (size %d). Creating a new one.", fileID, fileSize)
 		newLV, err := d.createNewLogicalVolume()
 		if err != nil {
-			return fmt.Errorf("could not create new logical volume: %w", err)
+			return "", nil, fmt.Errorf("could not create new logical volume: %w", err)
 		}
 		selectedLV = newLV
 	}
 
 	// Allocate space
-	d.allocateSpace(selectedLV, args.FileSize)
+	d.allocateSpace(selectedLV, fileSize)
 
 	// Record file mapping
-	d.fileIndex[args.FileID] = &FileMapping{
-		FileID:          args.FileID,
+	d.fileIndex[fileID] = &FileMapping{
+		FileID:          fileID,
 		LogicalVolumeID: selectedLV.ID,
-		FileSize:        args.FileSize,
+		FileSize:        fileSize,
 	}
 
 	// Build response
-	reply.LogicalVolumeID = selectedLV.ID
-	reply.Locations = make([]AssignWriteLocationInfo, 0, len(selectedLV.Placements))
+	locations := make([]WriteLocationInfo, 0, len(selectedLV.Placements))
 
 	for _, p := range selectedLV.Placements {
 		storeInfo, ok := d.stores[p.StoreID]
 		if !ok {
-			log.Printf("WARNING: Store %s for placement of LV %s (FileID %s) not found in registry", p.StoreID, selectedLV.ID, args.FileID)
+			log.Printf("WARNING: Store %s for placement of LV %s (FileID %s) not found in registry", p.StoreID, selectedLV.ID, fileID)
 			continue
 		}
 
-		reply.Locations = append(reply.Locations, AssignWriteLocationInfo{
+		locations = append(locations, WriteLocationInfo{
 			StoreID:         p.StoreID,
 			StoreAddress:    storeInfo.Address,
 			LogicalVolumeID: p.LogicalVolumeID,
 		})
 	}
 
-	if len(reply.Locations) == 0 {
+	if len(locations) == 0 {
 		// Rollback on failure
-		delete(d.fileIndex, args.FileID)
+		delete(d.fileIndex, fileID)
 		selectedLV.mu.Lock()
-		selectedLV.CurrentSize -= args.FileSize
+		selectedLV.CurrentSize -= fileSize
 		if !selectedLV.IsWritable && selectedLV.CurrentSize < selectedLV.MaxTotalSize {
 			selectedLV.IsWritable = true
 			d.writableLVs[selectedLV.ID] = selectedLV
 		}
 		selectedLV.mu.Unlock()
-		return fmt.Errorf("no valid store locations available for file %s", args.FileID)
+		return "", nil, fmt.Errorf("no valid store locations available for file %s", fileID)
 	}
 
-	log.Printf("Successfully assigned FileID %s (size %d) to LV %s with %d locations", args.FileID, args.FileSize, selectedLV.ID, len(reply.Locations))
-	return nil
+	log.Printf("Successfully assigned FileID %s (size %d) to LV %s with %d locations", fileID, fileSize, selectedLV.ID, len(locations))
+	return selectedLV.ID, locations, nil
 }
 
-func (d *Directory) GetReadLocations(args GetReadLocationsArgs, reply *GetReadLocationsReply) error {
+// GetReadLocations gets read locations for a file
+func (d *Directory) GetReadLocations(fileID string) ([]ReadLocationInfo, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	if args.FileID == "" {
-		return errors.New("FileID cannot be empty")
+	if fileID == "" {
+		return nil, errors.New("FileID cannot be empty")
 	}
 
-	fileMapping, ok := d.fileIndex[args.FileID]
+	fileMapping, ok := d.fileIndex[fileID]
 	if !ok {
-		return fmt.Errorf("file ID %s not found", args.FileID)
+		return nil, fmt.Errorf("file ID %s not found", fileID)
 	}
 
 	lv, ok := d.logicalVolumes[fileMapping.LogicalVolumeID]
 	if !ok {
-		return fmt.Errorf("logical volume %s for file %s not found", fileMapping.LogicalVolumeID, args.FileID)
+		return nil, fmt.Errorf("logical volume %s for file %s not found", fileMapping.LogicalVolumeID, fileID)
 	}
 
-	reply.Locations = make([]GetReadLocationInfo, 0, len(lv.Placements))
+	locations := make([]ReadLocationInfo, 0, len(lv.Placements))
 
 	for _, p := range lv.Placements {
 		storeInfo, ok := d.stores[p.StoreID]
 		if !ok {
-			log.Printf("WARNING: store %s for LV %s (file %s) not found in registry", p.StoreID, lv.ID, args.FileID)
+			log.Printf("WARNING: store %s for LV %s (file %s) not found in registry", p.StoreID, lv.ID, fileID)
 			continue
 		}
 
-		reply.Locations = append(reply.Locations, GetReadLocationInfo{
+		locations = append(locations, ReadLocationInfo{
 			StoreID:         p.StoreID,
 			StoreAddress:    storeInfo.Address,
 			LogicalVolumeID: p.LogicalVolumeID,
 		})
 	}
 
-	if len(reply.Locations) == 0 {
-		return fmt.Errorf("no available read locations for file %s", args.FileID)
+	if len(locations) == 0 {
+		return nil, fmt.Errorf("no available read locations for file %s", fileID)
 	}
 
-	return nil
+	return locations, nil
 }
 
-func StartDirectoryServer(dir *Directory, port int) error {
-	rpc.RegisterName("Directory", dir)
-	address := fmt.Sprintf(":%d", port)
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %v", address, err)
-	}
-	defer listener.Close()
-
-	log.Printf("Directory RPC server listening on %s", address)
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				log.Println("Directory RPC listener closed.")
-				return nil
-			}
-			log.Printf("Directory RPC server accept error: %v. Continuing...", err)
-			continue
-		}
-		go rpc.ServeConn(conn)
-	}
-}
-
+// Close closes all RPC client connections
 func (d *Directory) Close() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
