@@ -47,9 +47,9 @@ type FileMapping struct {
 
 // WriteLocationInfo contains information about where a file should be written
 type WriteLocationInfo struct {
-	StoreID         string
-	StoreAddress    string
-	LogicalVolumeID string
+	StoreID         string `json:"store_id"`
+	StoreAddress    string `json:"store_address"`
+	LogicalVolumeID string `json:"logical_volume_id"`
 }
 
 // ReadLocationInfo contains information about where a file can be read from
