@@ -47,6 +47,12 @@ type DirectoryFSM struct {
 	directory *Directory
 }
 
+func NewDirectoryFSM(replicationFactor int, maxLVSize int64) *DirectoryFSM {
+	return &DirectoryFSM{
+		directory: NewDirectory(replicationFactor, maxLVSize),
+	}
+}
+
 func (fsm *DirectoryFSM) Apply(entry *raft.Log) any {
 	var cmd Cmd
 	if err := json.Unmarshal(entry.Data, &cmd); err != nil {
@@ -110,19 +116,13 @@ func (fsm *DirectoryFSM) Snapshot() (raft.FSMSnapshot, error) {
 }
 
 func (fsm *DirectoryFSM) Restore(snapshot io.ReadCloser) error {
-	defer snapshot.Close()
 	return nil
 }
 
 type DirectorySnapshot struct{}
 
 func (s *DirectorySnapshot) Persist(sink raft.SnapshotSink) error {
-	_, err := sink.Write([]byte("{}"))
-	if err != nil {
-		sink.Cancel()
-		return err
-	}
-	return sink.Close()
+	return nil
 }
 
 func (s *DirectorySnapshot) Release() {
@@ -281,7 +281,7 @@ func (rs *RaftService) AssignWriteLocations(fileID string, fileSize int64) (stri
 	return lvID, locations, nil
 }
 
-func (rs *RaftService) GetReadLocations(fileID string) ([]directory.ReadLocationInfo, error) {
+func (rs *RaftService) GetReadLocations(fileID string) ([]ReadLocationInfo, error) {
 	return rs.fsm.directory.GetReadLocations(fileID)
 }
 
