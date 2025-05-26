@@ -1,0 +1,78 @@
+<svg viewBox="0 0 800 500" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="800" height="500" fill="#ffffff"/>
+  
+  <!-- Title -->
+  <text x="400" y="30" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#333">
+    Haystack Distributed File System
+  </text>
+  
+  <!-- Client (center) -->
+  <rect x="350" y="220" width="100" height="60" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="400" y="255" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#333">
+    Client
+  </text>
+  
+  <!-- Directory Raft Cluster (top) -->
+  <text x="400" y="70" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">
+    Directory (Raft Cluster)
+  </text>
+  
+  <!-- Raft Node 1 -->
+  <rect x="250" y="90" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="290" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Node 1</text>
+  
+  <!-- Raft Node 2 (Leader) -->
+  <rect x="360" y="90" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="400" y="110" text-anchor="middle" font-family="Arial, sans-serif" font-size="10" fill="#666">Leader</text>
+  <text x="400" y="120" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Node 2</text>
+  
+  <!-- Raft Node N -->
+  <rect x="470" y="90" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="510" y="115" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Node N</text>
+  
+  <!-- Store Servers (bottom) -->
+  <text x="400" y="370" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#333">
+    Store Servers
+  </text>
+  
+  <!-- Store Server 1 -->
+  <rect x="200" y="390" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="240" y="415" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Store 1</text>
+  
+  <!-- Store Server 2 -->
+  <rect x="300" y="390" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="340" y="415" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Store 2</text>
+  
+  <!-- Store Server 3 -->
+  <rect x="420" y="390" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="460" y="415" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Store 3</text>
+  
+  <!-- Store Server M -->
+  <rect x="520" y="390" width="80" height="40" rx="5" fill="#ffffff" stroke="#333" stroke-width="1"/>
+  <text x="560" y="415" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" fill="#333">Store M</text>
+  
+  <!-- Client to Directory connection -->
+  <line x1="400" y1="220" x2="400" y2="140" stroke="#333" stroke-width="1"/>
+  <polygon points="395,145 400,135 405,145" fill="#333"/>
+  <text x="410" y="180" font-family="Arial, sans-serif" font-size="11" fill="#666">1. Query location</text>
+  
+  <!-- Client to Store connections -->
+  <line x1="380" y1="280" x2="240" y2="390" stroke="#333" stroke-width="1"/>
+  <polygon points="245,385 240,390 250,390" fill="#333"/>
+  
+  <line x1="390" y1="280" x2="340" y2="390" stroke="#333" stroke-width="1"/>
+  <polygon points="345,385 340,390 350,390" fill="#333"/>
+  
+  <line x1="410" y1="280" x2="460" y2="390" stroke="#333" stroke-width="1"/>
+  <polygon points="455,385 460,390 465,385" fill="#333"/>
+  
+  <line x1="420" y1="280" x2="560" y2="390" stroke="#333" stroke-width="1"/>
+  <polygon points="555,385 560,390 565,385" fill="#333"/>
+  
+  <text x="250" y="340" font-family="Arial, sans-serif" font-size="11" fill="#666">2. Read/Write data</text>
+  
+  <!-- Raft connections -->
+  <line x1="330" y1="110" x2="360" y2="110" stroke="#333" stroke-width="1" stroke-dasharray="3,3"/>
+  <line x1="440" y1="110" x2="470" y2="110" stroke="#333" stroke-width="1" stroke-dasharray="3,3"/>
+</svg>
