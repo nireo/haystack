@@ -28,6 +28,12 @@ const (
 	CmdAssignWriteLocations
 )
 
+type ClusterNode struct {
+	RaftAddr string `json:"raft_addr,omitempty"`
+	HTTPAddr string `json:"http_addr,omitempty"`
+	IsLeader bool   `json:"is_leader,omitempty"`
+}
+
 type Cmd struct {
 	Type CmdType `json:"type"`
 	Data any     `json:"data"`
@@ -285,13 +291,80 @@ func (rs *RaftService) GetReadLocations(fileID string) ([]ReadLocationInfo, erro
 	return rs.fsm.directory.GetReadLocations(fileID)
 }
 
-func (rs *RaftService) AddVoter(nodeID, address string) error {
-	if rs.raft.State() != raft.Leader {
-		return fmt.Errorf("not the leader, cannot add voter")
+func (rs *RaftService) Join(id, addr string) error {
+	if !rs.IsLeader() {
+		return ErrNotLeader
 	}
 
-	future := rs.raft.AddVoter(raft.ServerID(nodeID), raft.ServerAddress(address), 0, 10*time.Second)
-	return future.Error()
+	serverID := raft.ServerID(id)
+	serverAddr := raft.ServerAddress(addr)
+
+	future := rs.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	for _, srv := range future.Configuration().Servers {
+		if srv.ID == serverID || srv.Address == serverAddr {
+			if srv.ID == serverID && srv.Address == serverAddr {
+				return nil
+			}
+
+			removeFuture := rs.raft.RemoveServer(serverID, 0, 0)
+			if err := removeFuture.Error(); err != nil {
+				return err
+			}
+		}
+	}
+
+	addFuture := rs.raft.AddVoter(serverID, serverAddr, 0, 0)
+	if err := addFuture.Error(); err != nil {
+		if err == raft.ErrNotLeader {
+			return ErrNotLeader
+		}
+
+		return err
+	}
+
+	return nil
+}
+
+func (rs *RaftService) AddVoter(nodeID, address string) error {
+	if !rs.IsLeader() {
+		return ErrNotLeader
+	}
+
+	serverID := raft.ServerID(nodeID)
+	serverAddr := raft.ServerAddress(address)
+
+	future := rs.raft.GetConfiguration()
+	if err := future.Error(); err != nil {
+		return err
+	}
+
+	for _, srv := range future.Configuration().Servers {
+		if srv.ID == serverID || srv.Address == serverAddr {
+			if srv.ID == serverID && srv.Address == serverAddr {
+				return nil
+			}
+
+			removeFuture := rs.raft.RemoveServer(serverID, 0, 0)
+			if err := removeFuture.Error(); err != nil {
+				return err
+			}
+		}
+	}
+
+	addFuture := rs.raft.AddVoter(serverID, serverAddr, 0, 0)
+	if err := addFuture.Error(); err != nil {
+		if err == raft.ErrNotLeader {
+			return ErrNotLeader
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func (rs *RaftService) RemoveServer(nodeID string) error {
@@ -329,4 +402,25 @@ func (rs *RaftService) Shutdown() error {
 
 	log.Println("Raft directory service shutdown complete")
 	return nil
+}
+
+func (rs *RaftService) GetCluster() ([]ClusterNode, error) {
+	if !rs.IsLeader() {
+		return nil, ErrNotLeader
+	}
+
+	fut := rs.raft.GetConfiguration()
+	if err := fut.Error(); err != nil {
+		return nil, err
+	}
+
+	clusterNodes := make([]ClusterNode, 0, len(fut.Configuration().Servers))
+	for _, node := range fut.Configuration().Servers {
+		clusterNodes = append(clusterNodes, ClusterNode{
+			RaftAddr: string(node.Address),
+			IsLeader: node.Address == rs.raft.Leader(),
+		})
+	}
+
+	return clusterNodes, nil
 }

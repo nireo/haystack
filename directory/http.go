@@ -8,10 +8,27 @@ import (
 	"strings"
 )
 
+type DirectoryService interface {
+	RegisterStore(storeID, address string) error
+	AssignWriteLocations(fileID string, fileSize int64) (string, []WriteLocationInfo, error)
+	GetReadLocations(fileID string) ([]ReadLocationInfo, error)
+}
+
+type ClusterService interface {
+	AddVoter(nodeID, address string) error
+	RemoveServer(nodeID string) error
+	IsLeader() bool
+	LeaderAddr() string
+	Stats() map[string]string
+	Shutdown() error
+	GetCluster() ([]ClusterNode, error)
+}
+
 // HTTPService implements a HTTP interface to interact with the raft cluster. It takes care of redirecting
 // write requests automatically to the leader node. So the experience for the client is seamless.
 type HTTPService struct {
-	raftService   *RaftService
+	dir           DirectoryService
+	cluster       ClusterService
 	httpAddr      string
 	nodeHTTPAddrs map[string]string
 }
@@ -20,9 +37,10 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-func NewHTTPService(raftService *RaftService, httpAddr string) *HTTPService {
+func NewHTTPService(clusterService ClusterService, dirService DirectoryService, httpAddr string) *HTTPService {
 	return &HTTPService{
-		raftService:   raftService,
+		cluster:       clusterService,
+		dir:           dirService,
 		httpAddr:      httpAddr,
 		nodeHTTPAddrs: make(map[string]string),
 	}
@@ -56,6 +74,7 @@ func (h *HTTPService) Start() error {
 	mux.HandleFunc("POST /api/v1/cluster/add-voter", h.handleAddVoter)
 	mux.HandleFunc("DELETE /api/v1/cluster/nodes/{nodeID}", h.handleRemoveServer)
 	mux.HandleFunc("GET /api/v1/status", h.handleStatus)
+	mux.HandleFunc("GET /api/v1/cluster/nodes", h.handleGetCluster)
 
 	log.Printf("Starting HTTP API server on %s", h.httpAddr)
 	return http.ListenAndServe(h.httpAddr, h.corsMiddleware(h.leaderRedirectMiddleware(mux)))
@@ -69,13 +88,14 @@ func (h *HTTPService) writeError(w http.ResponseWriter, statusCode int, message 
 
 func (h *HTTPService) leaderRedirectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" || strings.HasSuffix(r.URL.Path, "/status") {
+		// requets to get the node configuration should be directed to the leader
+		if (r.Method == "GET" && !strings.HasSuffix(r.URL.Path, "/nodes")) || strings.HasSuffix(r.URL.Path, "/status") {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if !h.raftService.IsLeader() {
-			leaderRaftAddr := h.raftService.LeaderAddr()
+		if !h.cluster.IsLeader() {
+			leaderRaftAddr := h.cluster.LeaderAddr()
 			if leaderRaftAddr == "" {
 				h.writeError(w, http.StatusServiceUnavailable, "no leader available")
 				return
@@ -109,7 +129,7 @@ func (h *HTTPService) handleRegisterStore(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.raftService.RegisterStore(req.StoreID, req.Address); err != nil {
+	if err := h.dir.RegisterStore(req.StoreID, req.Address); err != nil {
 		if err == ErrNotLeader {
 			h.writeError(w, http.StatusServiceUnavailable, "not the leader")
 			return
@@ -143,7 +163,7 @@ func (h *HTTPService) handleAssignWriteLocations(w http.ResponseWriter, r *http.
 		return
 	}
 
-	lvID, locations, err := h.raftService.AssignWriteLocations(req.FileID, req.FileSize)
+	lvID, locations, err := h.dir.AssignWriteLocations(req.FileID, req.FileSize)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -170,7 +190,7 @@ func (h *HTTPService) handleGetReadLocations(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	locations, err := h.raftService.GetReadLocations(fileID)
+	locations, err := h.dir.GetReadLocations(fileID)
 	if err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -202,7 +222,7 @@ func (h *HTTPService) handleAddVoter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.raftService.AddVoter(req.NodeID, req.Address); err != nil {
+	if err := h.cluster.AddVoter(req.NodeID, req.Address); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -221,16 +241,30 @@ func (h *HTTPService) handleRemoveServer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.raftService.RemoveServer(nodeID); err != nil {
+	if err := h.cluster.RemoveServer(nodeID); err != nil {
 		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": fmt.Sprintf("Server %s removed successfully", nodeID),
 	})
+}
+
+func (h *HTTPService) handleGetCluster(w http.ResponseWriter, _ *http.Request) {
+	nodes, err := h.cluster.GetCluster()
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	for i, node := range nodes {
+		nodes[i].HTTPAddr = h.nodeHTTPAddrs[node.RaftAddr]
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nodes)
 }
 
 type StatusResponse struct {
@@ -241,9 +275,9 @@ type StatusResponse struct {
 
 func (h *HTTPService) handleStatus(w http.ResponseWriter, r *http.Request) {
 	response := StatusResponse{
-		IsLeader:   h.raftService.IsLeader(),
-		LeaderAddr: h.raftService.LeaderAddr(),
-		Stats:      h.raftService.Stats(),
+		IsLeader:   h.cluster.IsLeader(),
+		LeaderAddr: h.cluster.LeaderAddr(),
+		Stats:      h.cluster.Stats(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
