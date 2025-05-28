@@ -254,7 +254,7 @@ func (s *DirectorySnapshot) Persist(sink raft.SnapshotSink) error {
 	}
 
 	log.Printf("successfully persisted snapshot with %d stores, %d logical volumes", len(s.state.Stores), len(s.state.LogicalVolumes))
-	return nil
+	return sink.Close()
 }
 
 func (s *DirectorySnapshot) Release() {

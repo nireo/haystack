@@ -1,12 +1,18 @@
 package directory
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type TestCluster struct {
@@ -425,4 +431,111 @@ func TestMultipleFileOperations(t *testing.T) {
 	}
 
 	t.Log("Successfully completed multiple file operations with proper error handling")
+}
+
+type mockSnapshotSink struct {
+	*bytes.Buffer
+	closed   bool
+	canceled bool
+}
+
+func newMockSnapshotSink() *mockSnapshotSink {
+	return &mockSnapshotSink{
+		Buffer: new(bytes.Buffer),
+	}
+}
+
+func (m *mockSnapshotSink) Close() error {
+	m.closed = true
+	return nil
+}
+
+func (m *mockSnapshotSink) Cancel() error {
+	m.canceled = true
+	return nil
+}
+
+func (m *mockSnapshotSink) ID() string {
+	return "test-snapshot"
+}
+
+func TestDirectorySnapshot_Basic(t *testing.T) {
+	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 4, 3, 2048)
+	defer CleanupClusterWithStores(cluster, listeners)
+
+	leader := cluster.GetLeader()
+	require.NotNil(t, leader)
+
+	files := []struct {
+		id   string
+		size int64
+	}{
+		{"file-1", 512},
+		{"file-2", 1024},
+		{"file-3", 256},
+		{"file-4", 1536},
+	}
+
+	lvIDs := make([]string, len(files))
+	for i, file := range files {
+		lvID, locations, err := leader.AssignWriteLocations(file.id, file.size)
+		require.NoError(t, err)
+		assert.Len(t, locations, 3)
+		lvIDs[i] = lvID
+	}
+
+	require.True(t, cluster.WaitForConsensus(5*time.Second))
+
+	snapshot, err := leader.fsm.Snapshot()
+	require.NoError(t, err)
+
+	sink := newMockSnapshotSink()
+	require.NoError(t, snapshot.Persist(sink))
+
+	var state SerializableDirectoryState
+	require.NoError(t, json.Unmarshal(sink.Bytes(), &state))
+
+	assert.Len(t, state.Stores, 4)
+	assert.Len(t, state.FileIndex, 4)
+	assert.NotEmpty(t, state.LogicalVolumes)
+	assert.NotEmpty(t, state.WritableLVs)
+	assert.NotZero(t, state.LVCounter)
+}
+
+func TestSnapshotRestoreWithFileOperations(t *testing.T) {
+	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 3, 2, 4096)
+	defer CleanupClusterWithStores(cluster, listeners)
+
+	leader := cluster.GetLeader()
+	require.NotNil(t, leader)
+
+	originalFiles := map[string]int64{
+		"file-1": 1024,
+		"file-2": 2048,
+		"file-3": 512,
+	}
+
+	for fileID, size := range originalFiles {
+		_, locations, err := leader.AssignWriteLocations(fileID, size)
+		require.NoError(t, err)
+		assert.Len(t, locations, 2)
+	}
+
+	require.True(t, cluster.WaitForConsensus(5*time.Second))
+
+	snapshot, err := leader.fsm.Snapshot()
+	require.NoError(t, err)
+
+	sink := newMockSnapshotSink()
+	require.NoError(t, snapshot.Persist(sink))
+
+	newFSM := NewDirectoryFSM(2, 4096)
+	reader := bytes.NewReader(sink.Bytes())
+	require.NoError(t, newFSM.Restore(io.NopCloser(reader)))
+
+	for fileID := range originalFiles {
+		readLocations, err := newFSM.directory.GetReadLocations(fileID)
+		require.NoError(t, err, "Failed to get read locations for %s after restore", fileID)
+		assert.Len(t, readLocations, 2)
+	}
 }
