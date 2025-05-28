@@ -16,7 +16,7 @@ import (
 	"github.com/nireo/haystack/directory"
 )
 
-func mainWithDynamicDiscovery() {
+func main() {
 	var (
 		nodeID       = flag.String("node-id", "", "Node ID")
 		raftAddr     = flag.String("raft-addr", "127.0.0.1:7000", "Raft bind address")
