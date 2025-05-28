@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -117,21 +118,147 @@ func (fsm *DirectoryFSM) applyAssignWriteLocation(data any) any {
 	}
 }
 
+type SerializableStoreInfo struct {
+	ID      string `json:"id"`
+	Address string `json:"address"`
+}
+
+type SerializableLogicalVolume struct {
+	ID           string      `json:"id"`
+	Placements   []Placement `json:"placements"`
+	IsWritable   bool        `json:"is_writable"`
+	MaxTotalSize int64       `json:"max_total_size"`
+	CurrentSize  int64       `json:"current_size"`
+}
+
+type SerializableDirectoryState struct {
+	Stores            map[string]*SerializableStoreInfo     `json:"stores"`
+	LogicalVolumes    map[string]*SerializableLogicalVolume `json:"logical_volumes"`
+	FileIndex         map[string]*FileMapping               `json:"file_index"`
+	WritableLVs       []string                              `json:"writable_lv_ids"`
+	ReplicationFactor int                                   `json:"replication_factor"`
+	MaxLVSize         int64                                 `json:"max_lv_size"`
+	LVCounter         uint64                                `json:"lv_counter"`
+}
+
+type DirectorySnapshot struct {
+	state *SerializableDirectoryState
+}
+
 func (fsm *DirectoryFSM) Snapshot() (raft.FSMSnapshot, error) {
-	return &DirectorySnapshot{}, nil
+	fsm.directory.mu.RLock()
+	defer fsm.directory.mu.RUnlock()
+
+	serializableStores := make(map[string]*SerializableStoreInfo, len(fsm.directory.stores))
+	for id, store := range fsm.directory.stores {
+		serializableStores[id] = &SerializableStoreInfo{
+			ID:      store.ID,
+			Address: store.Address,
+		}
+	}
+
+	serializableLVs := make(map[string]*SerializableLogicalVolume, len(fsm.directory.logicalVolumes))
+	for id, lv := range fsm.directory.logicalVolumes {
+		lv.mu.Lock()
+		serializableLVs[id] = &SerializableLogicalVolume{
+			ID:           lv.ID,
+			Placements:   lv.Placements,
+			IsWritable:   lv.IsWritable,
+			MaxTotalSize: lv.MaxTotalSize,
+			CurrentSize:  lv.CurrentSize,
+		}
+		lv.mu.Unlock()
+	}
+
+	writableLVIDs := make([]string, 0, len(fsm.directory.writableLVs))
+	for id := range fsm.directory.writableLVs {
+		writableLVIDs = append(writableLVIDs, id)
+	}
+
+	state := &SerializableDirectoryState{
+		Stores:            serializableStores,
+		LogicalVolumes:    serializableLVs,
+		FileIndex:         fsm.directory.fileIndex,
+		WritableLVs:       writableLVIDs,
+		ReplicationFactor: fsm.directory.replicationFactor,
+		MaxLVSize:         fsm.directory.maxLVSize,
+		LVCounter:         fsm.directory.lvCounter,
+	}
+
+	log.Printf("Creating snapshot with %d stores, %d logical volumes, %d files",
+		len(state.Stores), len(state.LogicalVolumes), len(state.FileIndex))
+
+	return &DirectorySnapshot{state: state}, nil
 }
 
 func (fsm *DirectoryFSM) Restore(snapshot io.ReadCloser) error {
+	defer snapshot.Close()
+
+	var state SerializableDirectoryState
+	decoder := json.NewDecoder(snapshot)
+	if err := decoder.Decode(&state); err != nil {
+		return fmt.Errorf("failed to decode snapshot: %w", err)
+	}
+
+	log.Printf("Restoring snapshot with %d stores, %d logical volumes, %d files",
+		len(state.Stores), len(state.LogicalVolumes), len(state.FileIndex))
+
+	newDirectory := &Directory{
+		stores:            make(map[string]*StoreInfo),
+		logicalVolumes:    make(map[string]*LogicalVolume),
+		fileIndex:         make(map[string]*FileMapping),
+		writableLVs:       make(map[string]*LogicalVolume),
+		replicationFactor: state.ReplicationFactor,
+		maxLVSize:         state.MaxLVSize,
+		lvCounter:         state.LVCounter,
+	}
+
+	for id, serStore := range state.Stores {
+		newDirectory.stores[id] = &StoreInfo{
+			ID:      serStore.ID,
+			Address: serStore.Address,
+			Client:  nil, // created on demand
+		}
+	}
+
+	for id, serLV := range state.LogicalVolumes {
+		lv := &LogicalVolume{
+			ID:           serLV.ID,
+			Placements:   serLV.Placements,
+			IsWritable:   serLV.IsWritable,
+			MaxTotalSize: serLV.MaxTotalSize,
+			CurrentSize:  serLV.CurrentSize,
+		}
+		newDirectory.logicalVolumes[id] = lv
+	}
+
+	for _, lvID := range state.WritableLVs {
+		if lv, exists := newDirectory.logicalVolumes[lvID]; exists {
+			newDirectory.writableLVs[lvID] = lv
+		}
+	}
+
+	maps.Copy(newDirectory.fileIndex, state.FileIndex)
+	fsm.directory.Close()
+	fsm.directory = newDirectory
+
+	log.Printf("successfully restored directory state from snapshot")
 	return nil
 }
 
-type DirectorySnapshot struct{}
-
 func (s *DirectorySnapshot) Persist(sink raft.SnapshotSink) error {
+	encoder := json.NewEncoder(sink)
+	if err := encoder.Encode(s.state); err != nil {
+		sink.Cancel()
+		return fmt.Errorf("failed to encode snapshot: %w", err)
+	}
+
+	log.Printf("successfully persisted snapshot with %d stores, %d logical volumes", len(s.state.Stores), len(s.state.LogicalVolumes))
 	return nil
 }
 
 func (s *DirectorySnapshot) Release() {
+	s.state = nil
 }
 
 type RaftService struct {

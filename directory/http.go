@@ -8,12 +8,14 @@ import (
 	"strings"
 )
 
+// DirectoryService defines what the HTPT service needs to manage the directory state.
 type DirectoryService interface {
 	RegisterStore(storeID, address string) error
 	AssignWriteLocations(fileID string, fileSize int64) (string, []WriteLocationInfo, error)
 	GetReadLocations(fileID string) ([]ReadLocationInfo, error)
 }
 
+// ClusterService defines what the HTTP service needs to manage the cluster.
 type ClusterService interface {
 	AddVoter(nodeID, address string) error
 	RemoveServer(nodeID string) error
