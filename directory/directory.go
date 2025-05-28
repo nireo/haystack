@@ -6,8 +6,6 @@ import (
 	"log"
 	"net/rpc"
 	"sync"
-
-	"github.com/google/uuid"
 )
 
 const (
@@ -70,6 +68,17 @@ type Directory struct {
 	writableLVs       map[string]*LogicalVolume
 	replicationFactor int
 	maxLVSize         int64
+
+	// we need a counter since the FSM needs to be deterministic i.e. when the construct the
+	// state from the log, it should be the same. If we generate uuids that is not the case.
+	// as there would be new logical volumes with different ids.
+	lvCounter uint64
+}
+
+func (d *Directory) getNextLVIDs() string {
+	d.lvCounter++
+	lvidOnNew := fmt.Sprintf("lvid-%d", d.lvCounter)
+	return lvidOnNew
 }
 
 // NewDirectory creates a new directory instance
@@ -89,6 +98,7 @@ func NewDirectory(replicationFactor int, maxLVSize int64) *Directory {
 		writableLVs:       make(map[string]*LogicalVolume),
 		replicationFactor: replicationFactor,
 		maxLVSize:         maxLVSize,
+		lvCounter:         0,
 	}
 }
 
@@ -189,15 +199,14 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 		}
 	}
 
-	alvID := uuid.New().String()
-	lvidOnNew := uuid.New().String()
+	lvidOnNew := d.getNextLVIDs()
 	placements := make([]Placement, 0, d.replicationFactor)
 	successfulPlacements := 0
 
 	for _, storeID := range selectedStoreIDs {
 		client, err := d.getOrEstablishStoreClient(storeID)
 		if err != nil {
-			log.Printf("Skipping store %s for ALV %s due to connection error: %v", storeID, alvID, err)
+			log.Printf("Skipping store %s for due to connection error: %v", storeID, err)
 			continue
 		}
 
@@ -216,26 +225,26 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 			LogicalVolumeID: lvidOnNew,
 		})
 		successfulPlacements++
-		log.Printf("Successfully created logical volume %s on store %s for ALV %s", lvidOnNew, storeID, alvID)
+		log.Printf("Successfully created logical volume %s on store %s", lvidOnNew, storeID)
 	}
 
 	if successfulPlacements < d.replicationFactor {
-		log.Printf("Failed to create ALV %s with enough replicas. Required: %d, Succeeded: %d", alvID, d.replicationFactor, successfulPlacements)
-		return nil, fmt.Errorf("failed to create logical volume %s with sufficient replicas (%d/%d)", alvID, successfulPlacements, d.replicationFactor)
+		log.Printf("Failed to create ALV %s with enough replicas. Required: %d, Succeeded: %d", lvidOnNew, d.replicationFactor, successfulPlacements)
+		return nil, fmt.Errorf("failed to create logical volume %s with sufficient replicas (%d/%d)", lvidOnNew, successfulPlacements, d.replicationFactor)
 	}
 
 	alv := &LogicalVolume{
-		ID:           alvID,
+		ID:           lvidOnNew,
 		Placements:   placements,
 		IsWritable:   true,
 		CurrentSize:  0,
 		MaxTotalSize: d.maxLVSize,
 	}
 
-	d.logicalVolumes[alvID] = alv
-	d.writableLVs[alvID] = alv // Add to writable set
+	d.logicalVolumes[lvidOnNew] = alv
+	d.writableLVs[lvidOnNew] = alv
 
-	log.Printf("Successfully created LogicalVolume %s with %d placements. LV ID on stores: %s", alvID, len(placements), lvidOnNew)
+	log.Printf("Successfully created LogicalVolume %s with %d placements", lvidOnNew, len(placements))
 	return alv, nil
 }
 
@@ -261,16 +270,13 @@ func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string,
 		return "", nil, err
 	}
 
-	// Check if file already exists
 	if _, exists := d.fileIndex[fileID]; exists {
 		return "", nil, fmt.Errorf("file %s already exists", fileID)
 	}
 
-	// Try to find existing writable LV
 	var selectedLV *LogicalVolume
 	selectedLV = d.findWritableLV(fileSize)
 
-	// If no suitable LV found, create new one
 	if selectedLV == nil {
 		log.Printf("No suitable existing LogicalVolume for FileID %s (size %d). Creating a new one.", fileID, fileSize)
 		newLV, err := d.createNewLogicalVolume()
@@ -280,19 +286,14 @@ func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string,
 		selectedLV = newLV
 	}
 
-	// Allocate space
 	d.allocateSpace(selectedLV, fileSize)
-
-	// Record file mapping
 	d.fileIndex[fileID] = &FileMapping{
 		FileID:          fileID,
 		LogicalVolumeID: selectedLV.ID,
 		FileSize:        fileSize,
 	}
 
-	// Build response
 	locations := make([]WriteLocationInfo, 0, len(selectedLV.Placements))
-
 	for _, p := range selectedLV.Placements {
 		storeInfo, ok := d.stores[p.StoreID]
 		if !ok {
@@ -308,7 +309,6 @@ func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string,
 	}
 
 	if len(locations) == 0 {
-		// Rollback on failure
 		delete(d.fileIndex, fileID)
 		selectedLV.mu.Lock()
 		selectedLV.CurrentSize -= fileSize
