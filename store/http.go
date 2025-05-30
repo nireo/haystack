@@ -56,6 +56,9 @@ func (h *HTTPService) Start() error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/v1/create_logical", h.handleCreateLogicalVolume)
+	mux.HandleFunc("POST /api/v1/create_file", h.handleCreateFile)
+	mux.HandleFunc("GET /api/v1/read_file", h.handleReadFile)
+	mux.HandleFunc("GET /api/v1/logicals", h.handleGetLogicals)
 
 	log.Printf("Starting HTTP API server on %s", h.httpAddr)
 	return http.ListenAndServe(h.httpAddr, h.corsMiddleware(mux))
@@ -108,4 +111,45 @@ func (h *HTTPService) handleCreateFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeMsg(w, "successfully wrote file")
+}
+
+func (h *HTTPService) handleReadFile(w http.ResponseWriter, r *http.Request) {
+	fileID := r.PathValue("file_id")
+	if fileID == "" {
+		h.writeError(w, http.StatusBadRequest, "file_id is not provided in path")
+		return
+	}
+
+	logicalID := r.PathValue("logical_id")
+	if fileID == "" {
+		h.writeError(w, http.StatusBadRequest, "file_id is not provided in path")
+		return
+	}
+
+	data, err := h.store.ReadFile(fileID, logicalID)
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("error reading file: %s", err))
+		return
+	}
+
+	w.Write(data)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *HTTPService) handleGetLogicals(w http.ResponseWriter, _ *http.Request) {
+	volumes := make([]LogicalVolumeInfo, 0, len(h.store.logicals))
+	for id, file := range h.store.logicals {
+		size, err := file.Size()
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, fmt.Sprintf("error reading file length: %s", err))
+			return
+		}
+
+		volumes = append(volumes, LogicalVolumeInfo{
+			ID:   id,
+			Size: size,
+		})
+	}
+
+	json.NewEncoder(w).Encode(&volumes)
 }

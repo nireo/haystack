@@ -90,8 +90,8 @@ func (s *StoreServer) CreateLogicalVolume(args CreateLogicalVolumeArgs, reply *C
 }
 
 type LogicalVolumeInfo struct {
-	ID   string
-	Size int64
+	ID   string `json:"id,omitempty"`
+	Size int64  `json:"size,omitempty"`
 }
 
 type GetLogicalVolumesArgs struct{}
