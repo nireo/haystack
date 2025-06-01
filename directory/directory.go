@@ -1,11 +1,16 @@
 package directory
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/rpc"
 	"sync"
+
+	"github.com/nireo/haystack/store"
 )
 
 const (
@@ -57,9 +62,16 @@ type ReadLocationInfo struct {
 	LogicalVolumeID string
 }
 
+// HttpClient provides a common interface to execute HTTP requests. This mainly exists such
+// that we can assert that certain requests have been made in tests.
+type HttpClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // Directory handles choosing replication locations for files
 type Directory struct {
 	mu             sync.RWMutex
+	client         HttpClient
 	stores         map[string]*StoreInfo
 	logicalVolumes map[string]*LogicalVolume
 	fileIndex      map[string]*FileMapping
@@ -384,4 +396,31 @@ func (d *Directory) Close() {
 		}
 	}
 	log.Println("Finished closing store clients.")
+}
+
+func (d *Directory) sendCreateLV(storeAddress, id string) error {
+	req := store.CreateLogicalVolumeRequest{
+		LogicalVolumeID: id,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	httpReq, err := http.NewRequest(http.MethodPost, storeAddress+"/api/v1/create_logical", bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	res, err := d.client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("error sending request to server %s got status: %d", storeAddress, err)
+	}
+
+	return nil
 }
