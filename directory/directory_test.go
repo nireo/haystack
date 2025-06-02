@@ -1,21 +1,34 @@
 package directory
 
 import (
-	"errors"
+	"encoding/json"
 	"log"
 	"net"
-	"net/rpc"
+	"net/http"
 	"os"
 	"strconv"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nireo/haystack/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type mockHttpClient struct {
+	calls map[string]string
+}
+
+func (h *mockHttpClient) Do(req *http.Request) (*http.Response, error) {
+	var body store.CreateLogicalVolumeRequest
+	err := json.NewDecoder(req.Body).Decode(&body)
+	if err != nil {
+		return nil, err
+	}
+
+	return &http.Response{StatusCode: http.StatusOK}, nil
+}
 
 type MockStore struct{}
 
@@ -23,45 +36,17 @@ func (s *MockStore) CreateLogicalVolume(args CreateLogicalVolumeArgs, reply *Cre
 	return nil
 }
 
-var mockStoreRegistered sync.Once
-
-func registerMockStoreService() {
-	mockStoreRegistered.Do(func() {
-		err := rpc.RegisterName("Store", new(MockStore))
-		if err != nil {
-			log.Fatalf("Failed to register MockStore for testing: %v", err)
-		}
-	})
-}
-
-func startNMockStores(t *testing.T, numStores int) ([]net.Listener, []string) {
+func createNAddrs(t *testing.T, numStores int) []string {
 	t.Helper()
-	registerMockStoreService()
 
-	listeners := make([]net.Listener, numStores)
 	addresses := make([]string, numStores)
 	for i := range numStores {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		require.NoError(t, err, "Failed to listen on a free port for mock store %d", i)
-
-		go func(l net.Listener) {
-			for {
-				conn, errAccept := l.Accept()
-				if errAccept != nil {
-					if errors.Is(errAccept, net.ErrClosed) || strings.Contains(errAccept.Error(), "use of closed network connection") {
-						return
-					}
-					log.Printf("Mock store server accept error: %v. Continuing...", errAccept)
-					return
-				}
-				go rpc.ServeConn(conn)
-			}
-		}(listener)
-
-		listeners[i] = listener
+		defer listener.Close() // we don't need the listener outside the scope of this function
 		addresses[i] = listener.Addr().String()
 	}
-	return listeners, addresses
+	return addresses
 }
 
 func TestMain(m *testing.M) {
@@ -72,7 +57,7 @@ func TestMain(m *testing.M) {
 
 func TestNewDirectory(t *testing.T) {
 	t.Run("Defaults", func(t *testing.T) {
-		dir := NewDirectory(0, 0)
+		dir := NewDirectory(0, 0, &mockHttpClient{})
 		require.NotNil(t, dir)
 		assert.Equal(t, defaultReplicationFactor, dir.replicationFactor)
 		assert.Equal(t, defaultMaxLVSize, dir.maxLVSize)
@@ -83,7 +68,7 @@ func TestNewDirectory(t *testing.T) {
 	})
 
 	t.Run("CustomValid", func(t *testing.T) {
-		dir := NewDirectory(5, 1024)
+		dir := NewDirectory(5, 1024, &mockHttpClient{})
 		require.NotNil(t, dir)
 		assert.Equal(t, 5, dir.replicationFactor)
 		assert.Equal(t, int64(1024), dir.maxLVSize)
@@ -91,7 +76,7 @@ func TestNewDirectory(t *testing.T) {
 }
 
 func TestDirectory_RegisterStore(t *testing.T) {
-	dir := NewDirectory(defaultReplicationFactor, defaultMaxLVSize)
+	dir := NewDirectory(defaultReplicationFactor, defaultMaxLVSize, &mockHttpClient{})
 	defer dir.Close()
 
 	err := dir.RegisterStore("store1", "127.0.0.1:8001")
@@ -110,12 +95,9 @@ func TestDirectory_RegisterStore(t *testing.T) {
 func TestDirectory_AssignAndGetLocations_Basic(t *testing.T) {
 	const numStores = 3
 	const testReplicationFactor = 3
-	listeners, storeAddresses := startNMockStores(t, numStores)
-	for _, l := range listeners {
-		defer l.Close()
-	}
+	storeAddresses := createNAddrs(t, numStores)
 
-	dir := NewDirectory(testReplicationFactor, defaultMaxLVSize)
+	dir := NewDirectory(testReplicationFactor, defaultMaxLVSize, &mockHttpClient{})
 	defer dir.Close()
 
 	for i := range numStores {
@@ -175,11 +157,10 @@ func TestDirectory_AssignAndGetLocations_Basic(t *testing.T) {
 }
 
 func TestDirectory_AssignWriteLocations_FileSizeExceedsMaxLV(t *testing.T) {
-	dir := NewDirectory(1, 100) // maxLVSize = 100
+	dir := NewDirectory(1, 100, &mockHttpClient{}) // maxLVSize = 100
 	defer dir.Close()
 
-	listeners, storeAddresses := startNMockStores(t, 1)
-	defer listeners[0].Close()
+	storeAddresses := createNAddrs(t, 1)
 	err := dir.RegisterStore("s1", storeAddresses[0])
 	require.NoError(t, err)
 
@@ -189,13 +170,10 @@ func TestDirectory_AssignWriteLocations_FileSizeExceedsMaxLV(t *testing.T) {
 }
 
 func TestDirectory_AssignWriteLocations_NotEnoughStoresForInitialLV(t *testing.T) {
-	dir := NewDirectory(3, defaultMaxLVSize) // replicationFactor = 3
+	dir := NewDirectory(3, defaultMaxLVSize, &mockHttpClient{}) // replicationFactor = 3
 	defer dir.Close()
 
-	listeners, storeAddresses := startNMockStores(t, 2) // Only 2 stores
-	for _, l := range listeners {
-		defer l.Close()
-	}
+	storeAddresses := createNAddrs(t, 2) // Only 2 stores
 	err := dir.RegisterStore("s1", storeAddresses[0])
 	require.NoError(t, err)
 	err = dir.RegisterStore("s2", storeAddresses[1])
@@ -208,7 +186,7 @@ func TestDirectory_AssignWriteLocations_NotEnoughStoresForInitialLV(t *testing.T
 }
 
 func TestDirectory_GetReadLocations_FileNotFound(t *testing.T) {
-	dir := NewDirectory(1, defaultMaxLVSize)
+	dir := NewDirectory(1, defaultMaxLVSize, &mockHttpClient{})
 	defer dir.Close()
 
 	_, err := dir.GetReadLocations("nonexistentfile")
@@ -221,12 +199,9 @@ func TestDirectory_LVFullAndNewLVCreation(t *testing.T) {
 	const testReplicationFactor = 1
 	const maxLVSizeSmall = 100
 
-	listeners, storeAddresses := startNMockStores(t, numStores)
-	for _, l := range listeners {
-		defer l.Close()
-	}
+	storeAddresses := createNAddrs(t, numStores)
 
-	dir := NewDirectory(testReplicationFactor, maxLVSizeSmall)
+	dir := NewDirectory(testReplicationFactor, maxLVSizeSmall, &mockHttpClient{})
 	defer dir.Close()
 
 	for i := range numStores {
@@ -280,12 +255,8 @@ func TestDirectory_DuplicateFileAssignment(t *testing.T) {
 	const numStores = 1
 	const testReplicationFactor = 1
 
-	listeners, storeAddresses := startNMockStores(t, numStores)
-	for _, l := range listeners {
-		defer l.Close()
-	}
-
-	dir := NewDirectory(testReplicationFactor, defaultMaxLVSize)
+	storeAddresses := createNAddrs(t, numStores)
+	dir := NewDirectory(testReplicationFactor, defaultMaxLVSize, &mockHttpClient{})
 	defer dir.Close()
 
 	err := dir.RegisterStore("store1", storeAddresses[0])
@@ -307,12 +278,8 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	const testReplicationFactor = 1
 	const maxLVSizeSmall = 150
 
-	listeners, storeAddresses := startNMockStores(t, numStores)
-	for _, l := range listeners {
-		defer l.Close()
-	}
-
-	dir := NewDirectory(testReplicationFactor, maxLVSizeSmall)
+	storeAddresses := createNAddrs(t, numStores)
+	dir := NewDirectory(testReplicationFactor, maxLVSizeSmall, &mockHttpClient{})
 	defer dir.Close()
 
 	err := dir.RegisterStore("store1", storeAddresses[0])
@@ -360,24 +327,4 @@ func TestDirectory_WritableLVManagement(t *testing.T) {
 	assert.Len(t, dir.writableLVs, 1)
 	_, exists = dir.writableLVs[lv4ID]
 	assert.True(t, exists)
-}
-
-func TestDirectory_Close(t *testing.T) {
-	dir := NewDirectory(1, 100)
-
-	listeners, storeAddresses := startNMockStores(t, 1)
-	l := listeners[0]
-	storeAddr := storeAddresses[0]
-
-	err := dir.RegisterStore("s1", storeAddr)
-	require.NoError(t, err)
-
-	_, err = dir.getOrEstablishStoreClient("s1")
-	require.NoError(t, err)
-	require.NotNil(t, dir.stores["s1"].Client)
-
-	dir.Close()
-	assert.Nil(t, dir.stores["s1"].Client, "Client should be nil after close")
-
-	l.Close() // Close mock server listener after test
 }

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/rpc"
+	"strings"
 	"sync"
 
 	"github.com/nireo/haystack/store"
@@ -22,7 +22,6 @@ const (
 type StoreInfo struct {
 	ID      string
 	Address string
-	Client  *rpc.Client
 }
 
 // Placement relates a given logical volume to a store server
@@ -94,7 +93,7 @@ func (d *Directory) getNextLVIDs() string {
 }
 
 // NewDirectory creates a new directory instance
-func NewDirectory(replicationFactor int, maxLVSize int64) *Directory {
+func NewDirectory(replicationFactor int, maxLVSize int64, client HttpClient) *Directory {
 	if replicationFactor <= 0 {
 		log.Printf("WARNING: Invalid replicationFactor %d, using default %d", replicationFactor, defaultReplicationFactor)
 		replicationFactor = defaultReplicationFactor
@@ -111,6 +110,7 @@ func NewDirectory(replicationFactor int, maxLVSize int64) *Directory {
 		replicationFactor: replicationFactor,
 		maxLVSize:         maxLVSize,
 		lvCounter:         0,
+		client:            client,
 	}
 }
 
@@ -123,41 +123,13 @@ func (d *Directory) RegisterStore(storeID, address string) error {
 		return errors.New("store id and address cannot be empty")
 	}
 
-	if existingStore, exists := d.stores[storeID]; exists {
-		log.Printf("store %s re-registering. old address: %s, new address: %s", storeID, existingStore.Address, address)
-		if existingStore.Client != nil {
-			existingStore.Client.Close()
-		}
-	}
-
 	d.stores[storeID] = &StoreInfo{
 		ID:      storeID,
 		Address: address,
-		Client:  nil,
 	}
 
 	log.Printf("store %s registered with address %s", storeID, address)
 	return nil
-}
-
-func (d *Directory) getOrEstablishStoreClient(storeID string) (*rpc.Client, error) {
-	storeInfo, ok := d.stores[storeID]
-	if !ok {
-		return nil, fmt.Errorf("store %s not found", storeID)
-	}
-
-	if storeInfo.Client != nil {
-		return storeInfo.Client, nil
-	}
-
-	client, err := rpc.Dial("tcp", storeInfo.Address)
-	if err != nil {
-		log.Printf("failed to connect to store %s at %s: %v", storeID, storeInfo.Address, err)
-		return nil, err
-	}
-
-	storeInfo.Client = client
-	return client, nil
 }
 
 // Simplified LV selection: find any writable LV with enough space
@@ -202,11 +174,10 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 		return nil, fmt.Errorf("not enough registered stores (%d) to meet replication factor (%d)", len(d.stores), d.replicationFactor)
 	}
 
-	// Simple store selection - just take first N available stores
-	selectedStoreIDs := make([]string, 0, d.replicationFactor)
-	for storeID := range d.stores {
-		selectedStoreIDs = append(selectedStoreIDs, storeID)
-		if len(selectedStoreIDs) >= d.replicationFactor {
+	selectedStores := make(map[string]string)
+	for storeID, info := range d.stores {
+		selectedStores[storeID] = info.Address
+		if len(selectedStores) >= d.replicationFactor {
 			break
 		}
 	}
@@ -215,20 +186,10 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 	placements := make([]Placement, 0, d.replicationFactor)
 	successfulPlacements := 0
 
-	for _, storeID := range selectedStoreIDs {
-		client, err := d.getOrEstablishStoreClient(storeID)
+	for storeID, addr := range selectedStores {
+		err := d.sendCreateLV(addr, lvidOnNew)
 		if err != nil {
-			log.Printf("Skipping store %s for due to connection error: %v", storeID, err)
-			continue
-		}
-
-		createLVArgs := CreateLogicalVolumeArgs{ID: lvidOnNew}
-		var createLVReply CreateLogicalVolumeReply
-		err = client.Call("Store.CreateLogicalVolume", createLVArgs, &createLVReply)
-		if err != nil {
-			log.Printf("Failed to create logical volume %s on store %s: %v. Closing client.", lvidOnNew, storeID, err)
-			d.stores[storeID].Client.Close()
-			d.stores[storeID].Client = nil
+			log.Printf("skipping store %s due to error: %s", storeID, err)
 			continue
 		}
 
@@ -378,24 +339,8 @@ func (d *Directory) GetReadLocations(fileID string) ([]ReadLocationInfo, error) 
 	return locations, nil
 }
 
-// Close closes all RPC client connections
 func (d *Directory) Close() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	log.Println("Closing RPC client connections to all registered stores...")
-	for storeID, storeInfo := range d.stores {
-		if storeInfo.Client != nil {
-			err := storeInfo.Client.Close()
-			if err != nil {
-				log.Printf("Error closing RPC client for store %s (%s): %v", storeID, storeInfo.Address, err)
-			} else {
-				log.Printf("Closed RPC client for store %s (%s)", storeID, storeInfo.Address)
-			}
-			storeInfo.Client = nil
-		}
-	}
-	log.Println("Finished closing store clients.")
+	return
 }
 
 func (d *Directory) sendCreateLV(storeAddress, id string) error {
@@ -406,6 +351,10 @@ func (d *Directory) sendCreateLV(storeAddress, id string) error {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return err
+	}
+
+	if !strings.HasPrefix(storeAddress, "http://") {
+		storeAddress = "http://" + storeAddress
 	}
 
 	httpReq, err := http.NewRequest(http.MethodPost, storeAddress+"/api/v1/create_logical", bytes.NewBuffer(data))

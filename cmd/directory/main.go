@@ -40,6 +40,7 @@ func main() {
 		*bootstrap,
 		*repFactor,
 		*maxLVSize,
+		http.DefaultClient,
 	)
 	if err != nil {
 		log.Fatalf("Failed to create Raft service: %v", err)

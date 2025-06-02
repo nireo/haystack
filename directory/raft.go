@@ -54,9 +54,9 @@ type DirectoryFSM struct {
 	directory *Directory
 }
 
-func NewDirectoryFSM(replicationFactor int, maxLVSize int64) *DirectoryFSM {
+func NewDirectoryFSM(replicationFactor int, maxLVSize int64, client HttpClient) *DirectoryFSM {
 	return &DirectoryFSM{
-		directory: NewDirectory(replicationFactor, maxLVSize),
+		directory: NewDirectory(replicationFactor, maxLVSize, client),
 	}
 }
 
@@ -217,7 +217,6 @@ func (fsm *DirectoryFSM) Restore(snapshot io.ReadCloser) error {
 		newDirectory.stores[id] = &StoreInfo{
 			ID:      serStore.ID,
 			Address: serStore.Address,
-			Client:  nil, // created on demand
 		}
 	}
 
@@ -267,8 +266,8 @@ type RaftService struct {
 	transport raft.Transport
 }
 
-func NewRaftService(nodeID, bindAddr, dataDir string, bootstrap bool, replicationFactor int, maxLVSize int64) (*RaftService, error) {
-	fsm := &DirectoryFSM{NewDirectory(replicationFactor, maxLVSize)}
+func NewRaftService(nodeID, bindAddr, dataDir string, bootstrap bool, replicationFactor int, maxLVSize int64, client HttpClient) (*RaftService, error) {
+	fsm := &DirectoryFSM{NewDirectory(replicationFactor, maxLVSize, client)}
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
 

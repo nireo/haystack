@@ -52,7 +52,7 @@ func CreateTestCluster(t *testing.T, nodeCount int, replicationFactor int, maxLV
 	nodeID := fmt.Sprintf("node-%d", 0)
 	bindAddr := fmt.Sprintf("127.0.0.1:%d", ports[0])
 
-	raftService, err := NewRaftService(nodeID, bindAddr, cluster.DataDirs[0], true, replicationFactor, maxLVSize)
+	raftService, err := NewRaftService(nodeID, bindAddr, cluster.DataDirs[0], true, replicationFactor, maxLVSize, &mockHttpClient{})
 	if err != nil {
 		cluster.Cleanup()
 		t.Fatalf("Failed to create bootstrap node: %v", err)
@@ -68,7 +68,7 @@ func CreateTestCluster(t *testing.T, nodeCount int, replicationFactor int, maxLV
 		nodeID := fmt.Sprintf("node-%d", i)
 		bindAddr := fmt.Sprintf("127.0.0.1:%d", ports[i])
 
-		raftService, err := NewRaftService(nodeID, bindAddr, cluster.DataDirs[i], false, replicationFactor, maxLVSize)
+		raftService, err := NewRaftService(nodeID, bindAddr, cluster.DataDirs[i], false, replicationFactor, maxLVSize, &mockHttpClient{})
 		if err != nil {
 			cluster.Cleanup()
 			t.Fatalf("Failed to create node %d: %v", i, err)
@@ -213,19 +213,16 @@ func getAvailablePort() (int, error) {
 	return addr.Port, nil
 }
 
-func CreateTestClusterWithStores(t *testing.T, nodeCount int, storeCount int, replicationFactor int, maxLVSize int64) (*TestCluster, []net.Listener, []string) {
+func CreateTestClusterWithStores(t *testing.T, nodeCount int, storeCount int, replicationFactor int, maxLVSize int64) (*TestCluster, []string) {
 	if storeCount < replicationFactor {
 		t.Fatalf("storeCount (%d) must be >= replicationFactor (%d)", storeCount, replicationFactor)
 	}
 
 	cluster := CreateTestCluster(t, nodeCount, replicationFactor, maxLVSize)
 
-	listeners, addresses := startNMockStores(t, storeCount)
+	addresses := createNAddrs(t, storeCount)
 
 	if !cluster.WaitForLeader(5 * time.Second) {
-		for _, listener := range listeners {
-			listener.Close()
-		}
 		cluster.Cleanup()
 		t.Fatal("No leader elected within timeout")
 	}
@@ -235,35 +232,26 @@ func CreateTestClusterWithStores(t *testing.T, nodeCount int, storeCount int, re
 		storeID := fmt.Sprintf("store-%d", i)
 		err := leader.RegisterStore(storeID, address)
 		if err != nil {
-			for _, listener := range listeners {
-				listener.Close()
-			}
 			cluster.Cleanup()
 			t.Fatalf("Failed to register store %s: %v", storeID, err)
 		}
 	}
 
 	if !cluster.WaitForConsensus(5 * time.Second) {
-		for _, listener := range listeners {
-			listener.Close()
-		}
 		cluster.Cleanup()
 		t.Fatal("Cluster failed to reach consensus after store registration")
 	}
 
-	return cluster, listeners, addresses
+	return cluster, addresses
 }
 
-func CleanupClusterWithStores(cluster *TestCluster, listeners []net.Listener) {
-	for _, listener := range listeners {
-		listener.Close()
-	}
+func CleanupClusterWithStores(cluster *TestCluster) {
 	cluster.Cleanup()
 }
 
 func TestRaftClusterBasic(t *testing.T) {
-	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 3, 2, 1024*1024)
-	defer CleanupClusterWithStores(cluster, listeners)
+	cluster, _ := CreateTestClusterWithStores(t, 3, 3, 2, 1024*1024)
+	defer CleanupClusterWithStores(cluster)
 
 	leader := cluster.GetLeader()
 	if leader == nil {
@@ -308,8 +296,8 @@ func TestRaftClusterBasic(t *testing.T) {
 }
 
 func TestRaftLeaderElectionWithStores(t *testing.T) {
-	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 4, 2, 1024*1024)
-	defer CleanupClusterWithStores(cluster, listeners)
+	cluster, _ := CreateTestClusterWithStores(t, 3, 4, 2, 1024*1024)
+	defer CleanupClusterWithStores(cluster)
 
 	var leaderIndex int = -1
 	for i, node := range cluster.Nodes {
@@ -369,8 +357,8 @@ func TestRaftLeaderElectionWithStores(t *testing.T) {
 }
 
 func TestMultipleFileOperations(t *testing.T) {
-	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 5, 3, 2048)
-	defer CleanupClusterWithStores(cluster, listeners)
+	cluster, _ := CreateTestClusterWithStores(t, 3, 5, 3, 2048)
+	defer CleanupClusterWithStores(cluster)
 
 	leader := cluster.GetLeader()
 	if leader == nil {
@@ -460,8 +448,8 @@ func (m *mockSnapshotSink) ID() string {
 }
 
 func TestDirectorySnapshot_Basic(t *testing.T) {
-	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 4, 3, 2048)
-	defer CleanupClusterWithStores(cluster, listeners)
+	cluster, _ := CreateTestClusterWithStores(t, 3, 4, 3, 2048)
+	defer CleanupClusterWithStores(cluster)
 
 	leader := cluster.GetLeader()
 	require.NotNil(t, leader)
@@ -503,8 +491,8 @@ func TestDirectorySnapshot_Basic(t *testing.T) {
 }
 
 func TestSnapshotRestoreWithFileOperations(t *testing.T) {
-	cluster, listeners, _ := CreateTestClusterWithStores(t, 3, 3, 2, 4096)
-	defer CleanupClusterWithStores(cluster, listeners)
+	cluster, _ := CreateTestClusterWithStores(t, 3, 3, 2, 4096)
+	defer CleanupClusterWithStores(cluster)
 
 	leader := cluster.GetLeader()
 	require.NotNil(t, leader)
@@ -529,7 +517,7 @@ func TestSnapshotRestoreWithFileOperations(t *testing.T) {
 	sink := newMockSnapshotSink()
 	require.NoError(t, snapshot.Persist(sink))
 
-	newFSM := NewDirectoryFSM(2, 4096)
+	newFSM := NewDirectoryFSM(2, 4096, &mockHttpClient{})
 	reader := bytes.NewReader(sink.Bytes())
 	require.NoError(t, newFSM.Restore(io.NopCloser(reader)))
 
