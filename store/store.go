@@ -37,7 +37,7 @@ func (s *Store) NewLogical(id string) error {
 	defer s.mu.Unlock()
 
 	if _, ok := s.logicals[id]; ok {
-		log.Printf("logical volume %s already exists", id)
+		log.Printf("[INFO] store: logical volume %s already exists", id)
 		return nil
 	}
 	filePath := path.Join(s.dir, id)
@@ -51,7 +51,7 @@ func (s *Store) NewLogical(id string) error {
 		s.index[id] = make(map[string]logical.FileMetadata)
 	}
 
-	log.Printf("successfully created and registered new logical volume: %s", id)
+	log.Printf("[INFO] store: created and registered logical volume %s", id)
 	return nil
 }
 

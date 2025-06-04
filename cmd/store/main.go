@@ -14,7 +14,7 @@ func main() {
 
 	st, err := store.NewStore(*logicalVolumeDir)
 	if err != nil {
-		log.Fatalf("cannot create store instance: %s", err)
+		log.Fatalf("[FATAL] store: cannot create store instance: %s", err)
 	}
 	defer st.Shutdown()
 

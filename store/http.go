@@ -60,7 +60,7 @@ func (h *HTTPService) Start() error {
 	mux.HandleFunc("GET /api/v1/read_file", h.handleReadFile)
 	mux.HandleFunc("GET /api/v1/logicals", h.handleGetLogicals)
 
-	log.Printf("Starting HTTP API server on %s", h.httpAddr)
+	log.Printf("[INFO] store: starting HTTP API server on %s", h.httpAddr)
 	return http.ListenAndServe(h.httpAddr, h.corsMiddleware(mux))
 }
 

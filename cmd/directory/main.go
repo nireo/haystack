@@ -30,7 +30,7 @@ func main() {
 	flag.Parse()
 
 	if *nodeID == "" {
-		log.Fatal("node-id is required")
+		log.Fatal("[FATAL] directory: node-id is required")
 	}
 
 	raftService, err := directory.NewRaftService(
@@ -43,14 +43,14 @@ func main() {
 		http.DefaultClient,
 	)
 	if err != nil {
-		log.Fatalf("Failed to create Raft service: %v", err)
+		log.Fatalf("[FATAL] directory: failed to create Raft service: %v", err)
 	}
 
 	httpService := directory.NewHTTPService(raftService, raftService, *httpAddr)
 	go func() {
-		log.Printf("Starting HTTP service on %s", *httpAddr)
+		log.Printf("[INFO] directory: starting HTTP service on %s", *httpAddr)
 		if err := httpService.Start(); err != nil {
-			log.Fatalf("HTTP service failed: %v", err)
+			log.Fatalf("[FATAL] directory: HTTP service failed: %v", err)
 		}
 	}()
 
@@ -59,7 +59,7 @@ func main() {
 			time.Sleep(2 * time.Second)
 			nodes, err := getClusterNodes(*existingAddr)
 			if err != nil {
-				log.Printf("Warning: Failed to discover cluster: %v", err)
+				log.Printf("[WARN] directory: failed to discover cluster: %v", err)
 				return
 			}
 
@@ -80,7 +80,7 @@ func main() {
 			}
 
 			if err := joinViaHTTP(leaderAddr, *nodeID, *raftAddr); err != nil {
-				log.Printf("Warning: Failed to join cluster: %v", err)
+				log.Printf("[WARN] directory: failed to join cluster: %v", err)
 			}
 		}()
 	}
@@ -89,13 +89,13 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigChan
-	log.Printf("Received signal %v, shutting down...", sig)
+	log.Printf("[INFO] directory: received signal %v, shutting down", sig)
 
 	if err := raftService.Shutdown(); err != nil {
-		log.Printf("Error during shutdown: %v", err)
+		log.Printf("[ERROR] directory: error during shutdown: %v", err)
 	}
 
-	log.Println("Shutdown complete")
+	log.Printf("[INFO] directory: shutdown complete")
 }
 
 func getClusterNodes(existingAddr string) ([]directory.ClusterNode, error) {

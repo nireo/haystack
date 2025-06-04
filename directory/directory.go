@@ -95,11 +95,11 @@ func (d *Directory) getNextLVIDs() string {
 // NewDirectory creates a new directory instance
 func NewDirectory(replicationFactor int, maxLVSize int64, client HttpClient) *Directory {
 	if replicationFactor <= 0 {
-		log.Printf("WARNING: Invalid replicationFactor %d, using default %d", replicationFactor, defaultReplicationFactor)
+		log.Printf("[WARN] directory: invalid replication factor %d, using default %d", replicationFactor, defaultReplicationFactor)
 		replicationFactor = defaultReplicationFactor
 	}
 	if maxLVSize <= 0 {
-		log.Printf("WARNING: Invalid maxLVSize %d, using default %d", maxLVSize, defaultMaxLVSize)
+		log.Printf("[WARN] directory: invalid max LV size %d, using default %d", maxLVSize, defaultMaxLVSize)
 		maxLVSize = defaultMaxLVSize
 	}
 	return &Directory{
@@ -128,7 +128,7 @@ func (d *Directory) RegisterStore(storeID, address string) error {
 		Address: address,
 	}
 
-	log.Printf("store %s registered with address %s", storeID, address)
+	log.Printf("[INFO] directory: store %s registered with address %s", storeID, address)
 	return nil
 }
 
@@ -157,7 +157,7 @@ func (d *Directory) allocateSpace(lv *LogicalVolume, fileSize int64) {
 	if lv.CurrentSize >= lv.MaxTotalSize {
 		lv.IsWritable = false
 		delete(d.writableLVs, lv.ID)
-		log.Printf("LogicalVolume %s is now full. Current: %d, Max: %d", lv.ID, lv.CurrentSize, lv.MaxTotalSize)
+		log.Printf("[INFO] directory: logical volume %s is now full (current: %d, max: %d)", lv.ID, lv.CurrentSize, lv.MaxTotalSize)
 	}
 }
 
@@ -189,7 +189,7 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 	for storeID, addr := range selectedStores {
 		err := d.sendCreateLV(addr, lvidOnNew)
 		if err != nil {
-			log.Printf("skipping store %s due to error: %s", storeID, err)
+			log.Printf("[WARN] directory: skipping store %s due to error: %s", storeID, err)
 			continue
 		}
 
@@ -198,11 +198,11 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 			LogicalVolumeID: lvidOnNew,
 		})
 		successfulPlacements++
-		log.Printf("Successfully created logical volume %s on store %s", lvidOnNew, storeID)
+		log.Printf("[INFO] directory: created logical volume %s on store %s", lvidOnNew, storeID)
 	}
 
 	if successfulPlacements < d.replicationFactor {
-		log.Printf("Failed to create ALV %s with enough replicas. Required: %d, Succeeded: %d", lvidOnNew, d.replicationFactor, successfulPlacements)
+		log.Printf("[ERROR] directory: failed to create logical volume %s with enough replicas (required: %d, succeeded: %d)", lvidOnNew, d.replicationFactor, successfulPlacements)
 		return nil, fmt.Errorf("failed to create logical volume %s with sufficient replicas (%d/%d)", lvidOnNew, successfulPlacements, d.replicationFactor)
 	}
 
@@ -217,7 +217,7 @@ func (d *Directory) createNewLogicalVolume() (*LogicalVolume, error) {
 	d.logicalVolumes[lvidOnNew] = alv
 	d.writableLVs[lvidOnNew] = alv
 
-	log.Printf("Successfully created LogicalVolume %s with %d placements", lvidOnNew, len(placements))
+	log.Printf("[INFO] directory: created logical volume %s with %d placements", lvidOnNew, len(placements))
 	return alv, nil
 }
 
@@ -251,7 +251,7 @@ func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string,
 	selectedLV = d.findWritableLV(fileSize)
 
 	if selectedLV == nil {
-		log.Printf("No suitable existing LogicalVolume for FileID %s (size %d). Creating a new one.", fileID, fileSize)
+		log.Printf("[INFO] directory: no suitable logical volume for file %s (size %d), creating new one", fileID, fileSize)
 		newLV, err := d.createNewLogicalVolume()
 		if err != nil {
 			return "", nil, fmt.Errorf("could not create new logical volume: %w", err)
@@ -270,7 +270,7 @@ func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string,
 	for _, p := range selectedLV.Placements {
 		storeInfo, ok := d.stores[p.StoreID]
 		if !ok {
-			log.Printf("WARNING: Store %s for placement of LV %s (FileID %s) not found in registry", p.StoreID, selectedLV.ID, fileID)
+			log.Printf("[WARN] directory: store %s for placement of LV %s (file %s) not found in registry", p.StoreID, selectedLV.ID, fileID)
 			continue
 		}
 
@@ -293,7 +293,7 @@ func (d *Directory) AssignWriteLocations(fileID string, fileSize int64) (string,
 		return "", nil, fmt.Errorf("no valid store locations available for file %s", fileID)
 	}
 
-	log.Printf("Successfully assigned FileID %s (size %d) to LV %s with %d locations", fileID, fileSize, selectedLV.ID, len(locations))
+	log.Printf("[INFO] directory: assigned file %s (size %d) to LV %s with %d locations", fileID, fileSize, selectedLV.ID, len(locations))
 	return selectedLV.ID, locations, nil
 }
 
@@ -321,7 +321,7 @@ func (d *Directory) GetReadLocations(fileID string) ([]ReadLocationInfo, error) 
 	for _, p := range lv.Placements {
 		storeInfo, ok := d.stores[p.StoreID]
 		if !ok {
-			log.Printf("WARNING: store %s for LV %s (file %s) not found in registry", p.StoreID, lv.ID, fileID)
+			log.Printf("[WARN] directory: store %s for LV %s (file %s) not found in registry", p.StoreID, lv.ID, fileID)
 			continue
 		}
 
@@ -366,9 +366,10 @@ func (d *Directory) sendCreateLV(storeAddress, id string) error {
 	if err != nil {
 		return err
 	}
+	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("error sending request to server %s got status: %d", storeAddress, err)
+		return fmt.Errorf("error sending request to server %s got status: %d", storeAddress, res.StatusCode)
 	}
 
 	return nil

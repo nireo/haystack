@@ -78,7 +78,7 @@ func (h *HTTPService) Start() error {
 	mux.HandleFunc("GET /api/v1/status", h.handleStatus)
 	mux.HandleFunc("GET /api/v1/cluster/nodes", h.handleGetCluster)
 
-	log.Printf("Starting HTTP API server on %s", h.httpAddr)
+	log.Printf("[INFO] directory: starting HTTP API server on %s", h.httpAddr)
 	return http.ListenAndServe(h.httpAddr, h.corsMiddleware(h.leaderRedirectMiddleware(mux)))
 }
 
