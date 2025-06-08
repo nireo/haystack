@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 )
@@ -89,12 +90,12 @@ func (l *Logical) WriteFile(id string, data []byte) (int64, error) {
 	encodedEntry = binary.LittleEndian.AppendUint64(encodedEntry, uint64(len(data)))
 	encodedEntry = append(encodedEntry, data...)
 
-	storedOffset := l.offset
+	storedOffset := atomic.LoadInt64(&l.offset)
 	written, err := l.file.Write(encodedEntry)
 	if err != nil {
 		return 0, err
 	}
-	l.offset += int64(written)
+	atomic.AddInt64(&l.offset, int64(written))
 
 	return storedOffset, nil
 }
