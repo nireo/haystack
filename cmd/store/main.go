@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 
 	"github.com/nireo/haystack/store"
@@ -18,6 +19,9 @@ func main() {
 	}
 	defer st.Shutdown()
 
-	storeServer := store.NewStoreServer(st, *port)
+	storeServer, err := store.NewHTTPService(fmt.Sprintf(":%d", *port), st, nil)
+	if err != nil {
+		log.Fatalf("[FATAL] store: cannot start http service: %s", err)
+	}
 	storeServer.Start()
 }
