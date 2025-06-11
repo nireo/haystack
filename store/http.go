@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+
+	"github.com/nireo/haystack/logging"
 )
 
 type TLSConfig struct {
@@ -68,10 +70,11 @@ func (h *HTTPService) Start() error {
 	mux.HandleFunc("GET /api/v1/logicals", h.handleGetLogicals)
 
 	log.Printf("[INFO] store: starting HTTP API server on %s", h.httpAddr)
+	logger := logging.NewLogger()
 
 	server := &http.Server{
 		Addr:    h.httpAddr,
-		Handler: h.corsMiddleware(mux),
+		Handler: logging.LoggingMiddleware(logger)(h.corsMiddleware(mux)),
 	}
 
 	if h.tlsConfig != nil {

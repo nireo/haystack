@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/nireo/haystack/logging"
 )
 
 // DirectoryService defines what the HTPT service needs to manage the directory state.
@@ -79,7 +81,9 @@ func (h *HTTPService) Start() error {
 	mux.HandleFunc("GET /api/v1/cluster/nodes", h.handleGetCluster)
 
 	log.Printf("[INFO] directory: starting HTTP API server on %s", h.httpAddr)
-	return http.ListenAndServe(h.httpAddr, h.corsMiddleware(h.leaderRedirectMiddleware(mux)))
+	logger := logging.NewLogger()
+
+	return http.ListenAndServe(h.httpAddr, logging.LoggingMiddleware(logger)(h.corsMiddleware(h.leaderRedirectMiddleware(mux))))
 }
 
 func (h *HTTPService) writeError(w http.ResponseWriter, statusCode int, message string) {
