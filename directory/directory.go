@@ -56,9 +56,9 @@ type WriteLocationInfo struct {
 
 // ReadLocationInfo contains information about where a file can be read from
 type ReadLocationInfo struct {
-	StoreID         string
-	StoreAddress    string
-	LogicalVolumeID string
+	StoreID         string `json:"store_id"`
+	StoreAddress    string `json:"store_address"`
+	LogicalVolumeID string `json:"logical_volume_id"`
 }
 
 // HttpClient provides a common interface to execute HTTP requests. This mainly exists such

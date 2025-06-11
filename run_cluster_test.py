@@ -64,17 +64,6 @@ class HaystackClient:
     ) -> bool:
         """Write file to a specific store"""
         try:
-            # The directory service assigns the logical volume ID, so we just need to ensure
-            # the logical volume exists on this store before writing the file
-            logical_response = requests.post(
-                f"http://{store_address}/api/v1/create_logical",
-                json={"logical_volume_id": logical_volume_id},
-                timeout=30,
-            )
-            # It's okay if logical volume already exists (should return success or already exists error)
-
-            # Write file - Based on the Go code using r.PathValue, the file_id and logical_id
-            # should be in the URL path. Let's construct the proper URL
             file_response = requests.post(
                 f"http://{store_address}/api/v1/create_file/{logical_volume_id}/{file_id}",
                 data=data,
@@ -99,9 +88,8 @@ class HaystackClient:
     ) -> Optional[bytes]:
         """Read file from a specific store"""
         try:
-            # Read file using proper URL path with logical_volume_id and file_id
             response = requests.get(
-                f"http://{store_address}/api/v1/read_file/{logical_volume_id}/{file_id}",
+                f"http://{store_address}/api/v1/{logical_volume_id}/{file_id}/read_file",
                 timeout=30,
             )
 
@@ -206,8 +194,6 @@ def test_file_operations(client: HaystackClient):
 
         print(f"Generated test data of size {len(test_data)} bytes for file: {file_id}")
 
-        # Step 1: Request write locations from directory service
-        # The directory service will create/assign a logical volume and return write locations
         print(f"Requesting write locations for file {file_id}...")
 
         write_locations = client.assign_write_locations(file_id, len(test_data))
@@ -229,10 +215,9 @@ def test_file_operations(client: HaystackClient):
         print(f"Directory assigned logical volume: {logical_volume_id}")
         print(f"Write locations count: {len(locations)}")
 
-        # Step 2: Write to all assigned store locations
         write_success_count = 0
         for i, location in enumerate(locations):
-            store_address = location.get("address")
+            store_address = location.get("store_address")
             if store_address:
                 print(f"Writing to store {i+1}/{len(locations)}: {store_address}")
                 success = client.write_file_to_store(
@@ -265,7 +250,7 @@ def test_file_operations(client: HaystackClient):
         verified_count = 0
 
         for i, location in enumerate(read_locations.get("locations", [])):
-            store_address = location.get("address")
+            store_address = location.get("store_address")
             if store_address:
                 print(f"Reading from store {i+1}: {store_address}")
                 read_data = client.read_file_from_store(

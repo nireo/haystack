@@ -63,8 +63,8 @@ func (h *HTTPService) Start() error {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /api/v1/create_logical", h.handleCreateLogicalVolume)
-	mux.HandleFunc("POST /api/v1/create_file", h.handleCreateFile)
-	mux.HandleFunc("GET /api/v1/read_file", h.handleReadFile)
+	mux.HandleFunc("POST /api/v1/{logical_id}/{file_id}/create_file", h.handleCreateFile)
+	mux.HandleFunc("GET /api/v1/{logical_id}/{file_id}/read_file", h.handleReadFile)
 	mux.HandleFunc("GET /api/v1/logicals", h.handleGetLogicals)
 
 	log.Printf("[INFO] store: starting HTTP API server on %s", h.httpAddr)
@@ -138,8 +138,8 @@ func (h *HTTPService) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logicalID := r.PathValue("logical_id")
-	if fileID == "" {
-		h.writeError(w, http.StatusBadRequest, "file_id is not provided in path")
+	if logicalID == "" {
+		h.writeError(w, http.StatusBadRequest, "logical_id is not provided in path")
 		return
 	}
 
