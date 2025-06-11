@@ -26,8 +26,8 @@ type StoreInfo struct {
 
 // Placement relates a given logical volume to a store server
 type Placement struct {
-	StoreID         string
-	LogicalVolumeID string
+	StoreID         string `json:"store_id"`
+	LogicalVolumeID string `json:"logical_volume_id"`
 }
 
 // LogicalVolume contains metadata about a store server
