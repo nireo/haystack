@@ -65,7 +65,7 @@ class HaystackClient:
         """Write file to a specific store"""
         try:
             file_response = requests.post(
-                f"http://{store_address}/api/v1/create_file/{logical_volume_id}/{file_id}",
+                f"http://{store_address}/api/v1/{logical_volume_id}/{file_id}/create_file",
                 data=data,
                 headers={"Content-Type": "application/octet-stream"},
                 timeout=30,
