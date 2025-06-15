@@ -183,6 +183,92 @@ def test_read_locations(client: HaystackClient, file_id: str):
         return False, None
 
 
+def test_comprehensive(client: HaystackClient):
+    print("\n=== Testing comprehesive test ===")
+    n = 1000
+
+    try:
+        file_content = generate_random_data(1024)
+        file_ids = []
+
+        print(f"creating {n} files")
+        successful_writes = 0
+        for i in range(0, n):
+            file_id = str(uuid.uuid4())
+            test_data = generate_random_data(1024)
+            write_locations = client.assign_write_locations(file_id, len(test_data))
+            file_ids.append(file_id)
+
+            logical_volume_id = write_locations.get("logical_volume_id")
+            locations = write_locations.get("locations", [])
+
+            if not logical_volume_id:
+                print("✗ No logical volume ID returned from directory")
+                return False
+
+            if not locations:
+                print("✗ No write locations available")
+                return False
+
+            print(f"Directory assigned logical volume: {logical_volume_id}")
+            print(f"Write locations count: {len(locations)}")
+
+            write_success_count = 0
+            for i, location in enumerate(locations):
+                store_address = location.get("store_address")
+                if store_address:
+                    print(f"Writing to store {i+1}/{len(locations)}: {store_address}")
+                    success = client.write_file_to_store(
+                        store_address, logical_volume_id, file_id, test_data
+                    )
+                    if success:
+                        write_success_count += 1
+                        successful_writes += 1
+                        print(f"  ✓ Successfully wrote to {store_address}")
+                    else:
+                        print(f"  ✗ Failed to write to {store_address}")
+
+        successful_reads = 0
+        for file_id in file_ids:
+            read_locations = client.get_read_locations(file_id)
+            print(
+                f"Directory returned read locations: {json.dumps(read_locations, indent=2)}"
+            )
+
+            read_success_count = 0
+            verified_count = 0
+
+            for i, location in enumerate(read_locations.get("locations", [])):
+                store_address = location.get("store_address")
+                if store_address:
+                    print(f"Reading from store {i+1}: {store_address}")
+                    read_data = client.read_file_from_store(
+                        store_address, logical_volume_id, file_id
+                    )
+
+                    if read_data is not None:
+                        read_success_count += 1
+                        if read_data == test_data:
+                            verified_count += 1
+                            successful_reads += 1
+                            print(f"  ✓ Data verified from {store_address}")
+                        else:
+                            print(
+                                f"  ✗ Data mismatch from {store_address} (expected {len(test_data)} bytes, got {len(read_data)} bytes)"
+                            )
+                    else:
+                        print(f"  ✗ Failed to read from {store_address}")
+        print(f"successful reads ({successful_reads}/{len(file_ids)})")
+        print(f"successful writes ({successful_writes}/{len(file_ids*3)})")
+
+    except Exception as e:
+        print(f"comprehensive test failed: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
 def test_file_operations(client: HaystackClient):
     """Test end-to-end file operations"""
     print("\n=== Testing End-to-End File Operations ===")
@@ -300,17 +386,14 @@ def main():
     print("Haystack Distributed File System Test")
     print("=" * 50)
 
-    # Configuration
     directory_urls = [
         "http://127.0.0.1:8001",
         "http://127.0.0.1:8002",
         "http://127.0.0.1:8003",
     ]
 
-    # Initialize client
     client = HaystackClient(directory_urls)
 
-    # Wait for cluster to be ready
     print("Waiting for cluster to be ready...")
     max_retries = 30
     for i in range(max_retries):
@@ -325,29 +408,31 @@ def main():
                 return 1
             time.sleep(2)
 
-    # Run tests
-    tests_passed = 0
-    total_tests = 3
-
-    if test_cluster_status(client):
-        tests_passed += 1
-
-    if test_write_locations(client)[0]:
-        tests_passed += 1
-
-    if test_file_operations(client):
-        tests_passed += 1
-
-    # Results
-    print(f"\n=== Test Results ===")
-    print(f"Tests passed: {tests_passed}/{total_tests}")
-
-    if tests_passed == total_tests:
-        print("✓ All tests passed!")
-        return 0
+    # tests_passed = 0
+    # total_tests = 3
+    #
+    # if test_cluster_status(client):
+    #     tests_passed += 1
+    #
+    # if test_write_locations(client)[0]:
+    #     tests_passed += 1
+    #
+    # if test_file_operations(client):
+    #     tests_passed += 1
+    #
+    # print(f"\n=== Test Results ===")
+    # print(f"Tests passed: {tests_passed}/{total_tests}")
+    #
+    # if tests_passed == total_tests:
+    #     print("✓ All tests passed!")
+    #     return 0
+    # else:
+    #     print("✗ Some tests failed")
+    #     return 1
+    if test_comprehensive(client):
+        print("passed comprehensive test")
     else:
-        print("✗ Some tests failed")
-        return 1
+        print("failed comprehensive test")
 
 
 if __name__ == "__main__":
