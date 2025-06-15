@@ -340,7 +340,6 @@ func (d *Directory) GetReadLocations(fileID string) ([]ReadLocationInfo, error) 
 }
 
 func (d *Directory) Close() {
-	return
 }
 
 func (d *Directory) sendCreateLV(storeAddress, id string) error {

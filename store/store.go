@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/nireo/haystack/logical"
 )
+
+var ErrLogicalAlreadyExists = errors.New("logical already exists")
 
 // Store has the logic for managing multiple logical volumes. It keeps track of all of the logical
 // volumes that exist.
