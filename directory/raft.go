@@ -84,7 +84,7 @@ func (fsm *DirectoryFSM) applyRegisterStore(data any) any {
 	}
 
 	var regData RegisterStoreData
-	if err := json.Unmarshal(dataBytes, &regData); err != nil {
+	if err = json.Unmarshal(dataBytes, &regData); err != nil {
 		return fmt.Errorf("failed to unmarshal register store data: %w", err)
 	}
 
@@ -103,7 +103,7 @@ func (fsm *DirectoryFSM) applyAssignWriteLocation(data any) any {
 	}
 
 	var assignData AssignWriteLocationData
-	if err := json.Unmarshal(dataBytes, &assignData); err != nil {
+	if err = json.Unmarshal(dataBytes, &assignData); err != nil {
 		return fmt.Errorf("failed to unmarshal assign write location data: %w", err)
 	}
 
@@ -281,7 +281,7 @@ func NewRaftService(nodeID, bindAddr, dataDir string, bootstrap bool, replicatio
 		return nil, fmt.Errorf("failed to create transport: %w", err)
 	}
 
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err = os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
@@ -376,7 +376,7 @@ func (rs *RaftService) AssignWriteLocations(fileID string, fileSize int64) (stri
 	}
 
 	future := rs.raft.Apply(cmdBytes, defaultTimeout)
-	if err := future.Error(); err != nil {
+	if err = future.Error(); err != nil {
 		return "", nil, fmt.Errorf("failed to apply command: %w", err)
 	}
 

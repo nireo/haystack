@@ -65,7 +65,7 @@ func (c *Client) CreateFile(fileID string, content []byte) error {
 
 // writeToStore writes file content to a specific store
 func (c *Client) writeToStore(location directory.WriteLocationInfo, fileID, logicalVolumeID string, content []byte) error {
-	url := fmt.Sprintf("http://%s/api/v1/%s/%s/create_file", location.Address, logicalVolumeID, fileID)
+	url := fmt.Sprintf("http://%s/api/v1/%s/%s/create_file", location.StoreAddress, logicalVolumeID, fileID)
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(content))
 	if err != nil {
